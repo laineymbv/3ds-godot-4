@@ -69,4 +69,12 @@ public:
 	void get_platform_features(List<String> *r_features) const override;
 	void resolve_platform_feature_priorities(const Ref<EditorExportPreset> &p_preset, HashSet<String> &p_features) override {}
 	void initialize() override;
+
+	// One-click deploy: send a debug build to the Homebrew Launcher's
+	// netloader (press Y there) with 3dslink, debugger pointed at this PC.
+	int get_options_count() const override;
+	String get_option_label(int p_index) const override;
+	String get_option_tooltip(int p_index) const override;
+	Ref<Texture2D> get_option_icon(int p_index) const override;
+	Error run(const Ref<EditorExportPreset> &p_preset, int p_option, BitField<EditorExportPlatform::DebugFlags> p_debug_flags) override;
 };

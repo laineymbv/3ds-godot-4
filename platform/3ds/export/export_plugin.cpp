@@ -37,6 +37,7 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/image.h"
+#include "core/io/ip.h"
 #include "core/os/os.h"
 #include "editor/editor_node.h"
 #include "editor/export/editor_export.h"
@@ -673,4 +674,84 @@ void EditorExportPlatform3DS::initialize() {
 		run_icon = ImageTexture::create_from_image(img);
 	}
 #endif
+}
+
+int EditorExportPlatform3DS::get_options_count() const {
+	String link = EDITOR_GET("export/3ds/3dslink");
+	return (!link.is_empty() && FileAccess::exists(link)) ? 1 : 0;
+}
+
+String EditorExportPlatform3DS::get_option_label(int p_index) const {
+	return TTR("Run on 3DS");
+}
+
+String EditorExportPlatform3DS::get_option_tooltip(int p_index) const {
+	return TTR("Sends a debug build to the Homebrew Launcher over Wi-Fi with 3dslink (press Y in the launcher first). Remote debugging connects back to this editor.");
+}
+
+Ref<Texture2D> EditorExportPlatform3DS::get_option_icon(int p_index) const {
+	return run_icon;
+}
+
+// The editor's debugger address defaults to 127.0.0.1, which the console
+// can't reach: use this PC's LAN address instead.
+static String _lan_address() {
+	List<IPAddress> addrs;
+	IP::get_singleton()->get_local_addresses(&addrs);
+	String fallback;
+	for (const IPAddress &a : addrs) {
+		if (!a.is_ipv4()) {
+			continue;
+		}
+		String s = String(a);
+		if (s.begins_with("192.168.") || s.begins_with("10.")) {
+			return s;
+		}
+		if (s.begins_with("172.")) {
+			int second = s.get_slicec('.', 1).to_int();
+			if (second >= 16 && second <= 31 && fallback.is_empty()) {
+				fallback = s; // Often a container bridge; prefer 192.168/10.
+			}
+		}
+	}
+	return fallback;
+}
+
+Error EditorExportPlatform3DS::run(const Ref<EditorExportPreset> &p_preset, int p_option, BitField<EditorExportPlatform::DebugFlags> p_debug_flags) {
+	String link = EDITOR_GET("export/3ds/3dslink");
+	String path = EditorPaths::get_singleton()->get_temp_dir().path_join("godot_run.3dsx");
+	Error err = export_project(p_preset, true, path, p_debug_flags);
+	if (err != OK) {
+		return err;
+	}
+
+	Vector<String> flags = gen_export_flags(p_debug_flags);
+	String lan = _lan_address();
+	for (String &f : flags) {
+		if (!lan.is_empty()) {
+			f = f.replace("127.0.0.1", lan).replace("localhost", lan);
+		}
+	}
+
+	List<String> args;
+	String address = EDITOR_GET("export/3ds/console_address");
+	if (!address.is_empty()) {
+		args.push_back("-a");
+		args.push_back(address);
+	}
+	args.push_back(path);
+	if (!flags.is_empty()) {
+		args.push_back("--");
+		for (const String &f : flags) {
+			args.push_back(f);
+		}
+	}
+	String output;
+	int exit_code = 0;
+	err = OS::get_singleton()->execute(link, args, &output, &exit_code, true);
+	if (err != OK || exit_code != 0) {
+		add_message(EXPORT_MESSAGE_ERROR, TTR("Run"), TTR("3dslink couldn't send the game. Is the Homebrew Launcher waiting (press Y) on the same network?") + "\n" + output);
+		return ERR_CANT_CONNECT;
+	}
+	return OK;
 }

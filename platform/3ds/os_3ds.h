@@ -42,6 +42,8 @@ class OS_3DS : public OS_Unix {
 	MainLoop *main_loop = nullptr;
 	JoypadN3DS *joypad = nullptr;
 	AudioDriver3DS audio_driver;
+	static constexpr uint32_t SOC_BUFFER_SIZE = 0x100000;
+	uint32_t *soc_buffer = nullptr;
 
 public:
 	void initialize() override;
@@ -65,6 +67,7 @@ public:
 	String get_temp_path() const override;
 	String get_executable_path() const override;
 	String get_locale() const override;
+	int get_processor_count() const override;
 	Dictionary get_memory_info() const override;
 
 	Error get_entropy(uint8_t *r_buffer, int p_bytes) override;

@@ -47,6 +47,7 @@ struct Texture {
 	C3D_Tex tex;
 	bool allocated = false;
 	bool filter = true;
+	bool mipmaps = false;
 
 	RID render_target; // Set when this is a viewport texture.
 	RID proxy_to; // Set for proxies (AnimatedTexture frames, etc.).

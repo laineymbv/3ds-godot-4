@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/mutex.h"
 #include "servers/audio/audio_server.h"
 
 #include <cstdint>
@@ -50,6 +51,17 @@ class AudioDriver3DS : public AudioDriver {
 	uint64_t buffers_played = 0;
 	int32_t last_peak = 0;
 
+#ifdef THREADS_ENABLED
+	// Mixing runs on its own thread above the main thread (on the New 3DS's
+	// third core when available), woken by the DSP after each frame.
+	Mutex mutex;
+	void *thread = nullptr; // libctru Thread
+	void *event = nullptr; // LightEvent
+	volatile bool exit_thread = false;
+	static void _thread_func(void *p_self);
+	static void _dsp_callback(void *p_self);
+#endif
+
 	void _fill(int p_index);
 
 public:
@@ -59,8 +71,13 @@ public:
 	int get_mix_rate() const override { return MIX_RATE; }
 	SpeakerMode get_speaker_mode() const override { return SPEAKER_MODE_STEREO; }
 	float get_latency() override { return (float)(BUFFER_FRAMES * BUFFER_COUNT) / MIX_RATE; }
+#ifdef THREADS_ENABLED
+	void lock() override { mutex.lock(); }
+	void unlock() override { mutex.unlock(); }
+#else
 	void lock() override {}
 	void unlock() override {}
+#endif
 	void finish() override;
 
 	void update();

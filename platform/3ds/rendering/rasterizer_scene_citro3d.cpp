@@ -91,6 +91,196 @@ void RasterizerSceneCitro3D::initialize() {
 }
 
 void RasterizerSceneCitro3D::finalize() {
+	if (sky_vertices) {
+		linearFree(sky_vertices);
+		sky_vertices = nullptr;
+	}
+	if (sky_indices) {
+		linearFree(sky_indices);
+		sky_indices = nullptr;
+	}
+}
+
+RID RasterizerSceneCitro3D::sky_allocate() {
+	return sky_owner.allocate_rid();
+}
+
+void RasterizerSceneCitro3D::sky_initialize(RID p_rid) {
+	sky_owner.initialize_rid(p_rid, Sky());
+}
+
+void RasterizerSceneCitro3D::sky_set_material(RID p_sky, RID p_material) {
+	Sky *sky = sky_owner.get_or_null(p_sky);
+	ERR_FAIL_NULL(sky);
+	sky->material = p_material;
+	sky_colors_valid = false;
+}
+
+bool RasterizerSceneCitro3D::free(RID p_rid) {
+	if (sky_owner.owns(p_rid)) {
+		sky_owner.free(p_rid);
+		return true;
+	}
+	return RasterizerSceneDummy::free(p_rid);
+}
+
+static Color _sky_param_color(const Material *p_m, const char *p_name, const Color &p_default) {
+	const Variant *v = p_m->params.getptr(StringName(p_name));
+	return (v && v->get_type() == Variant::COLOR) ? Color(*v) : p_default;
+}
+
+static float _sky_param_float(const Material *p_m, const char *p_name, float p_default) {
+	const Variant *v = p_m->params.getptr(StringName(p_name));
+	return (v && (v->get_type() == Variant::FLOAT || v->get_type() == Variant::INT)) ? float(*v) : p_default;
+}
+
+bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, Color &r_ambient) {
+	Sky *sky = sky_owner.get_or_null(environment_get_sky(p_environment));
+	Material *m = sky ? MaterialStorage::get_singleton()->get_material(sky->material) : nullptr;
+	if (!m) {
+		return false;
+	}
+	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	TextureStorage *ts = TextureStorage::get_singleton();
+
+	if (!sky_vertices) {
+		int vc = (SKY_RINGS + 1) * (SKY_SEGMENTS + 1);
+		sky_vertices = (Vertex *)linearAlloc(sizeof(Vertex) * vc);
+		sky_index_count = SKY_RINGS * SKY_SEGMENTS * 6;
+		sky_indices = (uint16_t *)linearAlloc(sizeof(uint16_t) * sky_index_count);
+		ERR_FAIL_COND_V(!sky_vertices || !sky_indices, false);
+		for (int ring = 0; ring <= SKY_RINGS; ring++) {
+			float lat = Math::PI * (0.5f - (float)ring / SKY_RINGS); // +90 .. -90
+			for (int seg = 0; seg <= SKY_SEGMENTS; seg++) {
+				float lon = Math::TAU * seg / SKY_SEGMENTS;
+				Vector3 d(Math::cos(lat) * Math::sin(lon), Math::sin(lat), -Math::cos(lat) * Math::cos(lon));
+				Vertex &v = sky_vertices[ring * (SKY_SEGMENTS + 1) + seg];
+				v.position[0] = d.x;
+				v.position[1] = d.y;
+				v.position[2] = d.z;
+				v.normal[0] = 0;
+				v.normal[1] = 1;
+				v.normal[2] = 0;
+				// Godot's panorama mapping: u from atan(x, -z), v from acos(y).
+				v.uv[0] = (float)seg / SKY_SEGMENTS + 0.5f; // Wraps (GPU_REPEAT).
+				v.uv[1] = (float)ring / SKY_RINGS;
+			}
+		}
+		int k = 0;
+		for (int ring = 0; ring < SKY_RINGS; ring++) {
+			for (int seg = 0; seg < SKY_SEGMENTS; seg++) {
+				uint16_t a = ring * (SKY_SEGMENTS + 1) + seg;
+				uint16_t b = a + SKY_SEGMENTS + 1;
+				sky_indices[k++] = a;
+				sky_indices[k++] = b;
+				sky_indices[k++] = a + 1;
+				sky_indices[k++] = a + 1;
+				sky_indices[k++] = b;
+				sky_indices[k++] = b + 1;
+			}
+		}
+		GSPGPU_FlushDataCache(sky_indices, sizeof(uint16_t) * sky_index_count);
+		sky_colors_valid = false;
+	}
+
+	// Colors: ProceduralSkyMaterial's gradient, or PhysicalSkyMaterial's
+	// rayleigh/ground colors, or white under a panorama.
+	Texture *pano = nullptr;
+	const Variant *pv = m->params.getptr(StringName("source_panorama"));
+	if (pv && pv->get_type() == Variant::RID) {
+		pano = ts->resolve_texture(*pv);
+	}
+	float exposure = _sky_param_float(m, "exposure", 1.0f);
+	Color top, horizon, ground_h, ground_b;
+	float inv_sky_curve = 0.6f / 0.15f, inv_ground_curve = 0.6f / 0.02f;
+	if (pano) {
+		top = horizon = ground_h = ground_b = Color(exposure, exposure, exposure);
+	} else if (m->params.has(StringName("sky_top_color"))) {
+		top = _sky_param_color(m, "sky_top_color", Color(0.385, 0.454, 0.55)) * exposure;
+		horizon = _sky_param_color(m, "sky_horizon_color", Color(0.646, 0.656, 0.67)) * exposure;
+		ground_b = _sky_param_color(m, "ground_bottom_color", Color(0.2, 0.169, 0.133)) * exposure;
+		ground_h = _sky_param_color(m, "ground_horizon_color", Color(0.646, 0.656, 0.67)) * exposure;
+		inv_sky_curve = _sky_param_float(m, "inv_sky_curve", inv_sky_curve);
+		inv_ground_curve = _sky_param_float(m, "inv_ground_curve", inv_ground_curve);
+	} else if (m->params.has(StringName("rayleigh_color"))) {
+		Color ray = _sky_param_color(m, "rayleigh_color", Color(0.3, 0.405, 0.6));
+		top = ray * exposure;
+		horizon = ray.lerp(Color(1, 1, 1), 0.55f) * exposure;
+		ground_b = _sky_param_color(m, "ground_color", Color(0.1, 0.07, 0.034)) * exposure;
+		ground_h = ground_b.lerp(horizon, 0.5f);
+	} else {
+		return false; // Custom sky shader: background color instead.
+	}
+	Color key[4] = { top, horizon, ground_h, ground_b };
+	bool changed = !sky_colors_valid;
+	for (int i = 0; i < 4 && !changed; i++) {
+		changed = key[i] != sky_colors_cache[i];
+	}
+	if (changed) {
+		for (int i = 0; i < 4; i++) {
+			sky_colors_cache[i] = key[i];
+		}
+		sky_colors_valid = true;
+		int vc = (SKY_RINGS + 1) * (SKY_SEGMENTS + 1);
+		for (int i = 0; i < vc; i++) {
+			Vertex &v = sky_vertices[i];
+			float y = v.position[1];
+			Color c;
+			if (y >= 0.0f) {
+				c = top.lerp(horizon, CLAMP(Math::pow(1.0f - y, inv_sky_curve), 0.0f, 1.0f));
+			} else {
+				c = ground_b.lerp(ground_h, CLAMP(Math::pow(1.0f + y, inv_ground_curve), 0.0f, 1.0f));
+			}
+			v.color[0] = (uint8_t)CLAMP(c.r * 255.0f, 0.0f, 255.0f);
+			v.color[1] = (uint8_t)CLAMP(c.g * 255.0f, 0.0f, 255.0f);
+			v.color[2] = (uint8_t)CLAMP(c.b * 255.0f, 0.0f, 255.0f);
+			v.color[3] = 255;
+		}
+		GSPGPU_FlushDataCache(sky_vertices, sizeof(Vertex) * vc);
+		sky_ambient = (top + horizon * 2.0f + ground_h) * 0.25f;
+	}
+	r_ambient = sky_ambient;
+
+	// Rotation only (the sky follows the camera), sized between near and far.
+	float radius = Math::sqrt(MAX(p_proj.get_z_near(), 0.01f) * p_proj.get_z_far());
+	Transform3D mv(p_view.basis * environment_get_sky_orientation(p_environment), Vector3());
+	mv.basis.scale(Vector3(radius, radius, radius));
+	C3D_Mtx mtx;
+	_transform_to_mtx(mv, &mtx);
+
+	r->bind_scene_program();
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mtx);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_scale, 1, 1, 1, 1);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_bias, 0, 0, 0, 0);
+	Vector2 uvs = pano ? pano->uv_scale() : Vector2(1, 1);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, uvs.x, uvs.y, 0, 0);
+
+	C3D_LightEnvBind(nullptr);
+	C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(e0);
+	if (pano) {
+		C3D_TexSetFilter(&pano->tex, GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&pano->tex, GPU_REPEAT, GPU_CLAMP_TO_EDGE);
+		C3D_TexBind(0, &pano->tex);
+		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
+	} else {
+		C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
+	}
+	for (int i = 1; i < 6; i++) {
+		C3D_TexEnvInit(C3D_GetTexEnv(i));
+	}
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+
+	C3D_BufInfo *bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, sky_vertices, sizeof(Vertex), 4, 0x3210);
+	C3D_DrawElements(GPU_TRIANGLES, sky_index_count, C3D_UNSIGNED_SHORT, sky_indices);
+	return true;
 }
 
 Ref<RenderSceneBuffers> RasterizerSceneCitro3D::render_buffers_create() {
@@ -285,6 +475,53 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 			C3D_LightSpotLut(pl, &light_spot[i]);
 		}
 	}
+}
+
+void RasterizerSceneCitro3D::_setup_fog(RID p_environment, const Projection &p_proj) {
+	if (!is_environment(p_environment) || !environment_get_fog_enabled(p_environment)) {
+		C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+		return;
+	}
+	// The PICA200 fog unit looks up visibility (1 = clear) by depth; build
+	// the table from Godot's fog curve, in view-space distance.
+	FogKey key;
+	key.mode = (int)environment_get_fog_mode(p_environment);
+	key.near = p_proj.get_z_near();
+	key.far = p_proj.get_z_far();
+	if (key.mode == RSE::ENV_FOG_MODE_DEPTH) {
+		key.a = environment_get_fog_depth_begin(p_environment);
+		key.b = environment_get_fog_depth_end(p_environment);
+		key.c = environment_get_fog_depth_curve(p_environment);
+	} else {
+		key.a = environment_get_fog_density(p_environment);
+	}
+	if (!(key == fog_key)) {
+		fog_key = key;
+		float data[256];
+		for (int i = 0; i <= 128; i++) {
+			float z = FogLut_CalcZ(i / 128.0f, key.near, key.far);
+			float fog;
+			if (key.mode == RSE::ENV_FOG_MODE_DEPTH) {
+				float end = key.b > key.a ? key.b : key.a + 0.001f;
+				float t = CLAMP((z - key.a) / (end - key.a), 0.0f, 1.0f);
+				fog = Math::pow(t, MAX(key.c, 0.0001f));
+			} else {
+				fog = 1.0f - Math::exp(-key.a * z);
+			}
+			float vis = CLAMP(1.0f - fog, 0.0f, 1.0f);
+			if (i < 128) {
+				data[i] = vis;
+			}
+			if (i > 0) {
+				data[i + 127] = vis - data[i - 1];
+			}
+		}
+		FogLut_FromArray(&fog_lut, data);
+	}
+	Color c = environment_get_fog_light_color(p_environment) * environment_get_fog_light_energy(p_environment);
+	C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
+	C3D_FogColor(color_to_abgr(c) & 0xFFFFFF);
+	C3D_FogLutBind(&fog_lut);
 }
 
 void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_transparent) {
@@ -482,6 +719,13 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 			ambient = (mode == RSE::ENV_BG_SKY ? environment_get_ambient_light(p_environment) : bg) * amb_energy;
 		}
 	}
+	bool draw_sky = false;
+	bool ambient_from_sky = false;
+	if (is_environment(p_environment) && environment_get_background(p_environment) == RSE::ENV_BG_SKY && sky_owner.owns(environment_get_sky(p_environment))) {
+		draw_sky = true;
+		RSE::EnvironmentAmbientSource src = environment_get_ambient_source(p_environment);
+		ambient_from_sky = src == RSE::ENV_AMBIENT_SOURCE_BG || src == RSE::ENV_AMBIENT_SOURCE_SKY;
+	}
 	if (rt->transparent) {
 		bg.a = 0;
 	}
@@ -527,6 +771,13 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 		r->bind_scene_program();
 		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.projection, &pm);
 
+		_setup_fog(p_environment, proj);
+		if (draw_sky) {
+			Color sky_amb;
+			if (_draw_sky(p_environment, eye_view, eye_proj, sky_amb) && ambient_from_sky) {
+				ambient = sky_amb * environment_get_ambient_light_energy(p_environment);
+			}
+		}
 		_setup_lights(p_lights, eye_view, p_camera_data->main_transform.origin, ambient);
 		_draw_list(opaque_list, eye_view, false);
 		_draw_list(transparent_list, eye_view, true);
@@ -536,6 +787,7 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 	ts->render_target_disable_clear_request(rb->render_target);
 
 	// The canvas draws next with its own buffers and state.
+	C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
 	C3D_LightEnvBind(nullptr);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	r->bind_canvas_program();

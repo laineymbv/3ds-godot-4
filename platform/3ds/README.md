@@ -81,6 +81,18 @@ The main thread gets a 1 MB stack.
 Godot's output goes to `sdmc:/3ds/godot/stdout.txt`; `user://` is
 `sdmc:/3ds/godot/app_userdata/<project name>/`.
 
+## Remote debugging and one-click run
+
+Debug templates honor `--remote-debug tcp://<pc>:6007` and other Godot
+arguments, taken from the launcher (3dslink) and from
+`sdmc:/3ds/godot/args.txt` (one argument per line).
+
+In the fork's editor, set Editor Settings > Export > 3DS > 3dslink (the
+devkitPro tool) and optionally Console Address. A "Run on 3DS" button then
+appears for the 3DS preset: press Y in the Homebrew Launcher, click the
+button, and the game starts with the editor's debugger, output and remote
+scene tree connected.
+
 ## Screens and windows
 
 - The main window is the top screen (400x240). Set the project's viewport size
@@ -157,7 +169,11 @@ renderer maps Godot's built-in materials onto it:
   scissor, texture filter/repeat hints.
 - Hardware per-pixel lighting for up to 8 lights: directional, omni and spot
   (Godot's distance falloff), plus the environment's ambient light.
-- `Environment` background color or clear color.
+- `Environment` background: clear color, color, or sky (ProceduralSkyMaterial,
+  PanoramaSkyMaterial, PhysicalSkyMaterial approximated; ambient "Sky"
+  takes its color), and fog (exponential and depth modes) on the PICA fog
+  unit.
+- Mipmaps for textures imported with mipmaps (the 3D default).
 - `MultiMesh` (per-instance color), `CPUParticles3D` and `CPUParticles2D`.
 - Skeletons and blend shapes, skinned on the CPU (the PICA200 has uniform
   room for only ~28 bone matrices).
@@ -170,8 +186,8 @@ renderer maps Godot's built-in materials onto it:
   pipeline. A warning is printed once.
 
 Not implemented yet: GPU particles (need compute shaders: use CPUParticles),
-2D skeletons, shadows, fog, sky, mipmaps, 2D lights, reflection probes and
-other post-processing. Textures larger than 1024x1024 are downscaled.
+2D skeletons, shadows, 2D lights, sun disk/clouds in the procedural sky,
+reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.
 
 ## Other limitations
 
@@ -180,8 +196,13 @@ other post-processing. Textures larger than 1024x1024 are downscaled.
   underrun. On real hardware it needs the DSP firmware dump at
   `sdmc:/3ds/dspfirm.cdc` (made by the DSP1 homebrew); without it the game
   runs silently with an error in the log. No microphone input.
-- Networking is stubbed (no sockets).
-- Built without threads (`threads=no`).
+- Networking: IPv4 TCP/UDP over Wi-Fi (`HTTPRequest`, `StreamPeerTCP`,
+  ENet/WebSocket if those modules are enabled). No IPv6; servers should bind
+  IPv4 addresses. soc:u takes 1 MB of memory.
+- Threads: Godot's threads run below the main thread's priority on core 0
+  (the 3DS kernel doesn't time-slice equal priorities), so background work
+  uses the time the main thread waits for vsync. Audio mixes on its own
+  thread (core 2 on the New 3DS).
 - No GDExtension (no dynamic loading on the 3DS).
 
 ## Porting notes

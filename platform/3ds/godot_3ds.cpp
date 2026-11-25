@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include <sys/stat.h>
 
 // libctru splits application memory into the normal heap (Godot) and the
@@ -68,11 +69,37 @@ void __wrap___system_allocateHeaps(void) {
 #endif
 	__real___system_allocateHeaps();
 }
+
+// std::thread (used by Godot's Thread) can't pass a stack size, and libctru
+// gives such threads 32 KiB: far too little for resource loading or
+// GDScript. Give them 512 KiB unless a size was asked for.
+int __real_pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+
+int __wrap_pthread_create(pthread_t *r_thread, const pthread_attr_t *p_attr, void *(*p_func)(void *), void *p_arg) {
+	size_t size = 0;
+	if (p_attr) {
+		pthread_attr_getstacksize(p_attr, &size);
+	}
+	if (size >= 64 * 1024) {
+		return __real_pthread_create(r_thread, p_attr, p_func, p_arg);
+	}
+	pthread_attr_t attr;
+	if (p_attr) {
+		attr = *p_attr;
+	} else {
+		pthread_attr_init(&attr);
+	}
+	pthread_attr_setstacksize(&attr, 512 * 1024);
+	return __real_pthread_create(r_thread, &attr, p_func, p_arg);
+}
 }
 
 // The game is a .pck inside the .3dsx RomFS. A path given by the launcher
 // (argv[1], e.g. from 3dslink) overrides it for quick testing.
 static const char *DEFAULT_PACK = "romfs:/game.pck";
+
+#include "core/string/ustring.h"
+#include "core/templates/vector.h"
 
 int main(int argc, char *argv[]) {
 	romfsInit();
@@ -89,12 +116,38 @@ int main(int argc, char *argv[]) {
 	OS_3DS os;
 	setlocale(LC_CTYPE, "");
 
-	const char *pack = DEFAULT_PACK;
-	if (argc > 1 && argv[1] && strstr(argv[1], ".pck")) {
-		pack = argv[1];
+	// Arguments: the .pck from RomFS, then whatever the launcher passed
+	// (3dslink: `3dslink game.3dsx -- --remote-debug tcp://pc:6007`), then
+	// one argument per line from sdmc:/3ds/godot/args.txt if it exists.
+	Vector<CharString> args;
+	String pack = DEFAULT_PACK;
+	for (int i = 1; i < argc; i++) {
+		String a = String::utf8(argv[i]);
+		if (i == 1 && a.ends_with(".pck")) {
+			pack = a;
+		} else {
+			args.push_back(a.utf8());
+		}
 	}
-	const char *args[] = { "--main-pack", pack };
-	Error err = Main::setup(argc > 0 ? argv[0] : "sdmc:/3ds/godot.3dsx", 2, (char **)args);
+	FILE *af = fopen("sdmc:/3ds/godot/args.txt", "r");
+	if (af) {
+		char line[512];
+		while (fgets(line, sizeof(line), af)) {
+			String a = String::utf8(line).strip_edges();
+			if (!a.is_empty() && !a.begins_with("#")) {
+				args.push_back(a.utf8());
+			}
+		}
+		fclose(af);
+	}
+	args.insert(0, pack.utf8());
+	args.insert(0, CharString("--main-pack"));
+	Vector<char *> arg_ptrs;
+	for (CharString &c : args) {
+		arg_ptrs.push_back(c.ptrw());
+		printf("arg: %s\n", c.get_data());
+	}
+	Error err = Main::setup(argc > 0 ? argv[0] : "sdmc:/3ds/godot.3dsx", arg_ptrs.size(), arg_ptrs.ptrw());
 	if (err != OK) {
 		printf("Main::setup failed: %d\n", (int)err);
 		fflush(stdout);

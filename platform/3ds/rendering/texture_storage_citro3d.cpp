@@ -220,11 +220,16 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 			break;
 	}
 
-	if (p_tex->allocated && (p_tex->tex_width != tw || p_tex->tex_height != th || p_tex->gpu_format != fmt)) {
+	// Images imported with mipmaps (3D textures, by default) get a full GPU
+	// mip chain down to 8x8, built on the CPU from the padded image.
+	bool want_mips = p_image->has_mipmaps() && tw >= 16 && th >= 16;
+
+	if (p_tex->allocated && (p_tex->tex_width != tw || p_tex->tex_height != th || p_tex->gpu_format != fmt || p_tex->mipmaps != want_mips)) {
 		_texture_release(p_tex);
 	}
 	if (!p_tex->allocated) {
-		if (!C3D_TexInit(&p_tex->tex, tw, th, fmt)) {
+		bool ok = want_mips ? C3D_TexInitMipmap(&p_tex->tex, tw, th, fmt) : C3D_TexInit(&p_tex->tex, tw, th, fmt);
+		if (!ok) {
 			ERR_PRINT(vformat("3DS: out of linear memory for a %dx%d texture.", tw, th));
 			return;
 		}
@@ -233,6 +238,7 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 	p_tex->tex_width = tw;
 	p_tex->tex_height = th;
 	p_tex->gpu_format = fmt;
+	p_tex->mipmaps = want_mips;
 
 	// The logical size stays what Godot uploaded; when the image had to be
 	// shrunk, UVs still span it because uv_scale uses the stored ratio.
@@ -241,28 +247,54 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 		p_tex->height = ih;
 	}
 
-	uint8_t *dst = (uint8_t *)p_tex->tex.data;
-	memset(dst, 0, tw * th * bpp);
-	const uint8_t *src = img->ptr();
-	for (int y = 0; y < ih; y++) {
-		for (int x = 0; x < iw; x++) {
-			const uint8_t *s = src + (y * iw + x) * bpp;
-			uint8_t *d = dst + image_offset(x, y, tw, th) * bpp;
-			if (bpp == 4) {
-				d[0] = s[3];
-				d[1] = s[2];
-				d[2] = s[1];
-				d[3] = s[0];
-			} else if (bpp == 2) {
-				d[0] = s[1];
-				d[1] = s[0];
-			} else {
-				d[0] = s[0];
+	// Pad to the power-of-two size (top-left aligned, like UVs expect).
+	Ref<Image> padded = img;
+	if (iw != tw || ih != th) {
+		padded = Image::create_empty(tw, th, false, img->get_format());
+		padded->blit_rect(img, Rect2i(0, 0, iw, ih), Point2i());
+	}
+	if (want_mips) {
+		padded->generate_mipmaps();
+	}
+
+	int levels = want_mips ? p_tex->tex.maxLevel + 1 : 1;
+	for (int level = 0; level < levels; level++) {
+		int lw = MAX(tw >> level, 8);
+		int lh = MAX(th >> level, 8);
+		u32 level_size = 0;
+		uint8_t *dst = (uint8_t *)C3D_TexGetImagePtr(&p_tex->tex, p_tex->tex.data, level, &level_size);
+		int mip = MIN(level, padded->get_mipmap_count());
+		int64_t ofs = 0, mip_bytes = 0;
+		padded->get_mipmap_offset_and_size(mip, ofs, mip_bytes);
+		int mw = MAX(tw >> mip, 1);
+		int mh = MAX(th >> mip, 1);
+		const uint8_t *src = padded->ptr() + ofs;
+		int cw = MIN(mw, lw);
+		int ch = MIN(mh, lh);
+		memset(dst, 0, lw * lh * bpp);
+		for (int y = 0; y < ch; y++) {
+			for (int x = 0; x < cw; x++) {
+				const uint8_t *sp = src + (y * mw + x) * bpp;
+				uint8_t *d = dst + image_offset(x, y, lw, lh) * bpp;
+				if (bpp == 4) {
+					d[0] = sp[3];
+					d[1] = sp[2];
+					d[2] = sp[1];
+					d[3] = sp[0];
+				} else if (bpp == 2) {
+					d[0] = sp[1];
+					d[1] = sp[0];
+				} else {
+					d[0] = sp[0];
+				}
 			}
 		}
 	}
 	C3D_TexFlush(&p_tex->tex);
 	C3D_TexSetFilter(&p_tex->tex, GPU_LINEAR, GPU_LINEAR);
+	if (want_mips) {
+		C3D_TexSetFilterMipmap(&p_tex->tex, GPU_LINEAR);
+	}
 	C3D_TexSetWrap(&p_tex->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 }
 

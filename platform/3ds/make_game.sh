@@ -16,7 +16,7 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 P3=$ROOT/platform/3ds
-ELF=$ROOT/bin/godot.3ds.template_release.arm32.nothreads.elf
+ELF=$ROOT/bin/godot.3ds.template_release.arm32.elf
 TITLE= AUTHOR="Made with Godot Engine" ICON=$P3/icon.png BANNER=$P3/cia/banner.png ID=
 while [ $# -gt 2 ]; do
 	case "$1" in

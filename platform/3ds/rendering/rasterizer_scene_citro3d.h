@@ -101,6 +101,30 @@ private:
 
 	double time = 0;
 
+	// Sky: a sphere around the camera, colored (procedural/physical) or
+	// textured (panorama), drawn first without depth.
+	struct Sky {
+		RID material;
+	};
+	RID_Owner<Sky, true> sky_owner;
+	static constexpr int SKY_SEGMENTS = 24;
+	static constexpr int SKY_RINGS = 12;
+	Citro3D::Vertex *sky_vertices = nullptr;
+	uint16_t *sky_indices = nullptr;
+	int sky_index_count = 0;
+	Color sky_colors_cache[4];
+	bool sky_colors_valid = false;
+	Color sky_ambient;
+	bool _draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, Color &r_ambient);
+
+	C3D_FogLut fog_lut;
+	struct FogKey {
+		int mode = -1;
+		float a = 0, b = 0, c = 0, near = 0, far = 0;
+		bool operator==(const FogKey &o) const { return mode == o.mode && a == o.a && b == o.b && c == o.c && near == o.near && far == o.far; }
+	} fog_key;
+	void _setup_fog(RID p_environment, const Projection &p_proj);
+
 	void _add_mesh(GeometryInstanceCitro3D *p_gi, RID p_mesh, const Transform3D &p_model, const Color &p_color, float p_depth);
 	void _fill_draw_lists(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances);
 	void _setup_lights(const PagedArray<RID> &p_lights, const Transform3D &p_view, const Vector3 &p_cam_pos, const Color &p_ambient);
@@ -120,5 +144,10 @@ public:
 	void render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data = nullptr, RenderingServerTypes::RenderInfo *r_render_info = nullptr) override;
 
 	void set_time(double p_time, double p_step) override { time = p_time; }
+
+	RID sky_allocate() override;
+	void sky_initialize(RID p_rid) override;
+	void sky_set_material(RID p_sky, RID p_material) override;
+	bool free(RID p_rid) override;
 	Ref<RenderSceneBuffers> render_buffers_create() override;
 };

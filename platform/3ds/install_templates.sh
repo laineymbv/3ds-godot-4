@@ -9,7 +9,7 @@ DEST=${1:-${XDG_DATA_HOME:-$HOME/.local/share}/godot/export_templates}/$VERSION
 mkdir -p "$DEST"
 for t in debug release; do
 	for ext in 3dsx elf; do
-		src=$ROOT/bin/godot.3ds.template_$t.arm32.nothreads.$ext
+		src=$ROOT/bin/godot.3ds.template_$t.arm32.$ext; [ -f "$src" ] || src=$ROOT/bin/godot.3ds.template_$t.arm32.nothreads.$ext
 		[ -f "$src" ] && cp "$src" "$DEST/3ds_$t.$ext" && echo "installed $DEST/3ds_$t.$ext"
 	done
 done

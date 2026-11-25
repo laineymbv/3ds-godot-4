@@ -68,11 +68,47 @@ Error AudioDriver3DS::init() {
 	return OK;
 }
 
+#ifdef THREADS_ENABLED
+void AudioDriver3DS::_dsp_callback(void *p_self) {
+	AudioDriver3DS *self = (AudioDriver3DS *)p_self;
+	LightEvent_Signal((LightEvent *)self->event);
+}
+
+void AudioDriver3DS::_thread_func(void *p_self) {
+	AudioDriver3DS *self = (AudioDriver3DS *)p_self;
+	while (!self->exit_thread) {
+		self->mutex.lock();
+		self->update();
+		self->mutex.unlock();
+		LightEvent_Wait((LightEvent *)self->event);
+	}
+}
+#endif
+
 void AudioDriver3DS::start() {
 	if (!samples) {
 		return;
 	}
 	active = true;
+#ifdef THREADS_ENABLED
+	event = memalloc(sizeof(LightEvent));
+	LightEvent_Init((LightEvent *)event, RESET_ONESHOT);
+	exit_thread = false;
+	s32 main_prio = 0x30;
+	svcGetThreadPriority(&main_prio, CUR_THREAD_HANDLE);
+	bool is_new = false;
+	APT_CheckNew3DS(&is_new);
+	// Core 2 is free for applications on the New 3DS; elsewhere stay on core 0.
+	thread = threadCreate(_thread_func, this, 64 * 1024, main_prio - 1, is_new ? 2 : -2, false);
+	if (!thread && is_new) {
+		thread = threadCreate(_thread_func, this, 64 * 1024, main_prio - 1, -2, false);
+	}
+	if (thread) {
+		ndspSetCallback(_dsp_callback, this);
+		return;
+	}
+	ERR_PRINT("3DS: couldn't start the audio thread; mixing on the main loop.");
+#endif
 	update(); // Queue the first buffers right away.
 }
 
@@ -108,6 +144,20 @@ void AudioDriver3DS::update() {
 }
 
 void AudioDriver3DS::finish() {
+#ifdef THREADS_ENABLED
+	if (thread) {
+		exit_thread = true;
+		LightEvent_Signal((LightEvent *)event);
+		threadJoin((CtruThread)thread, U64_MAX);
+		threadFree((CtruThread)thread);
+		thread = nullptr;
+		ndspSetCallback(nullptr, nullptr);
+	}
+	if (event) {
+		memfree(event);
+		event = nullptr;
+	}
+#endif
 	if (active || samples) {
 		ndspChnWaveBufClear(CHANNEL);
 		ndspExit();

@@ -43,8 +43,12 @@ void register_3ds_exporter_types() {
 void register_3ds_exporter() {
 	EDITOR_DEF("export/3ds/makerom", "");
 	EDITOR_DEF("export/3ds/bannertool", "");
+	EDITOR_DEF("export/3ds/3dslink", "");
+	EDITOR_DEF("export/3ds/console_address", "");
 	EditorSettings::get_singleton()->add_property_hint(PropertyInfo(Variant::STRING, "export/3ds/makerom", PROPERTY_HINT_GLOBAL_FILE));
 	EditorSettings::get_singleton()->add_property_hint(PropertyInfo(Variant::STRING, "export/3ds/bannertool", PROPERTY_HINT_GLOBAL_FILE));
+	EditorSettings::get_singleton()->add_property_hint(PropertyInfo(Variant::STRING, "export/3ds/3dslink", PROPERTY_HINT_GLOBAL_FILE));
+	EditorSettings::get_singleton()->add_property_hint(PropertyInfo(Variant::STRING, "export/3ds/console_address", PROPERTY_HINT_PLACEHOLDER_TEXT, "Found automatically on the network"));
 
 	Ref<EditorExportPlatform3DS> platform;
 	platform.instantiate();

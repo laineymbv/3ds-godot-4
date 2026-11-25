@@ -69,7 +69,7 @@ def get_flags():
         "arch": "arm32",
         "target": "template_release",
         "optimize": "size_extra",
-        "threads": False,
+        "threads": True,
         "vulkan": False,
         "opengl3": False,
         "d3d12": False,
@@ -132,7 +132,6 @@ def configure(env: "SConsEnvironment"):
             "__3DS__",
             "THREEDS_ENABLED",
             "UNIX_ENABLED",
-            "UNIX_SOCKET_UNAVAILABLE",
             "NO_FCNTL",
             "PTHREAD_NO_RENAME",
             ("FIONREAD", "0x541B"),
@@ -155,7 +154,7 @@ def configure(env: "SConsEnvironment"):
         ]
     )
     env.Append(CPPDEFINES=[("THREEDS_LINEAR_HEAP_MB", int(env["linear_heap_mb"]))])
-    env.Append(LINKFLAGS=["-Wl,--wrap=__system_allocateHeaps"])
+    env.Append(LINKFLAGS=["-Wl,--wrap=__system_allocateHeaps", "-Wl,--wrap=pthread_create"])
 
     env.Append(
         CPPPATH=[

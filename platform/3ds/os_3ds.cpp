@@ -33,16 +33,50 @@
 #include "display_server_3ds.h"
 
 #include "core/config/project_settings.h"
-#include "ip_3ds.h"
+#include "core/os/thread.h"
+#include "drivers/unix/ip_unix.h"
+#include "drivers/unix/net_socket_unix.h"
 #include "main/main.h"
 
 #include "ctru.h"
 
 #include <malloc.h>
 
+#ifdef THREADS_ENABLED
+// The 3DS kernel doesn't time-slice threads of equal priority, so a busy
+// worker at the main thread's priority would freeze it. Godot's threads run
+// below the main thread and use the time it spends waiting (vsync, I/O).
+static void _set_thread_priority(Thread::Priority p_priority) {
+	s32 main_prio = 0x30;
+	int prio = p_priority == Thread::PRIORITY_HIGH ? main_prio + 1 : (p_priority == Thread::PRIORITY_LOW ? 0x3F : 0x3E);
+	svcSetThreadPriority(CUR_THREAD_HANDLE, prio);
+}
+#endif
+
+int OS_3DS::get_processor_count() const {
+	// Worker threads share core 0 below the main thread; two is plenty.
+	return 2;
+}
+
 void OS_3DS::initialize() {
 	OS_Unix::initialize_core();
-	IP3DS::make_default();
+#ifdef THREADS_ENABLED
+	Thread::PlatformFunctions pf;
+	pf.set_priority = _set_thread_priority;
+	Thread::_set_platform_functions(pf);
+#endif
+	// BSD sockets through soc:u; the service needs a 0x1000-aligned buffer.
+	soc_buffer = (u32 *)memalign(0x1000, SOC_BUFFER_SIZE);
+	if (soc_buffer && R_SUCCEEDED(socInit(soc_buffer, SOC_BUFFER_SIZE))) {
+		IPUnix::make_default();
+		NetSocketUnix::make_default();
+	} else {
+		if (soc_buffer) {
+			free(soc_buffer);
+			soc_buffer = nullptr;
+		}
+		ERR_PRINT("3DS: socInit failed; networking is unavailable.");
+	}
 	DisplayServer3DS::register_3ds_driver();
 }
 
@@ -67,6 +101,11 @@ void OS_3DS::delete_main_loop() {
 
 void OS_3DS::finalize() {
 	delete_main_loop();
+	if (soc_buffer) {
+		socExit();
+		free(soc_buffer);
+		soc_buffer = nullptr;
+	}
 	if (joypad) {
 		memdelete(joypad);
 		joypad = nullptr;
@@ -208,7 +247,9 @@ void OS_3DS::run() {
 	main_loop->initialize();
 	while (aptMainLoop()) {
 		DisplayServer::get_singleton()->process_events();
-		audio_driver.update();
+#ifndef THREADS_ENABLED
+		audio_driver.update(); // Threaded builds mix on the audio thread.
+#endif
 		if (Main::iteration()) {
 			break;
 		}
