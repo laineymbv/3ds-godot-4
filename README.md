@@ -31,8 +31,8 @@ console from the Homebrew Launcher or install it as a CIA.
 
 ## Status
 
-- Tested in the Azahar emulator and on a New 3DS, where the showcase and
-  platformer run at 60 fps.
+- The showcase and platformer have run on a New 3DS. Frame rates were measured
+  in the Azahar emulator, which runs at 60 fps for both.
 - The original 3DS is supported but has only been tested in the emulator's
   original-console mode, which doesn't model its speed.
 - Some features aren't implemented: GPU particles, reflection probes,
