@@ -87,10 +87,18 @@ void RasterizerSceneCitro3D::initialize() {
 		LightLut_Phong(&specular_luts[i], shininess[i]);
 	}
 	GLOBAL_DEF("rendering/3ds/stereo/max_separation", 0.12);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/3ds/shadows/size", PROPERTY_HINT_ENUM, "256,512,1024"), 512);
+	GLOBAL_DEF("rendering/3ds/shadows/max_distance", 20.0);
+	GLOBAL_DEF("rendering/3ds/shadows/bias", 0.012);
 	GLOBAL_DEF("rendering/3ds/stereo/convergence", 3.0);
 }
 
 void RasterizerSceneCitro3D::finalize() {
+	if (shadow_target) {
+		C3D_RenderTargetDelete(shadow_target);
+		C3D_TexDelete(&shadow_tex);
+		shadow_target = nullptr;
+	}
 	if (sky_vertices) {
 		linearFree(sky_vertices);
 		sky_vertices = nullptr;
@@ -261,8 +269,8 @@ bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_v
 	if (pano) {
 		C3D_TexSetFilter(&pano->tex, GPU_LINEAR, GPU_LINEAR);
 		C3D_TexSetWrap(&pano->tex, GPU_REPEAT, GPU_CLAMP_TO_EDGE);
-		C3D_TexBind(0, &pano->tex);
-		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexBind(1, &pano->tex);
+		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
 	} else {
 		C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
@@ -425,6 +433,10 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 	C3D_LightEnvAmbient(&light_env, p_ambient.r, p_ambient.g, p_ambient.b);
 	C3D_LightEnvLut(&light_env, GPU_LUT_D0, GPU_LUTINPUT_NH, false, &specular_luts[0]);
 	bound_specular = 0;
+	if (shadow_active) {
+		C3D_LightEnvShadowMode(&light_env, GPU_SHADOW_PRIMARY | GPU_SHADOW_SECONDARY);
+		C3D_LightEnvShadowSel(&light_env, 0);
+	}
 
 	int count = MIN((int)candidates.size(), MAX_LIGHTS);
 	for (int i = 0; i < count; i++) {
@@ -437,6 +449,9 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 		float spec = c.light->param[RSE::LIGHT_PARAM_SPECULAR];
 		C3D_LightSpecular0(pl, col.r * spec, col.g * spec, col.b * spec);
 		C3D_LightSpecular1(pl, 0, 0, 0);
+
+		bool shadowed = shadow_active && c.li == LightStorage::get_singleton()->get_light_instance(shadow_light_instance);
+		C3D_LightShadowEnable(pl, shadowed);
 
 		const Transform3D &lx = c.li->transform;
 		if (c.light->type == RSE::LIGHT_DIRECTIONAL) {
@@ -545,7 +560,7 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 		GPU_TEXTURE_WRAP_PARAM w = (info && info->texture_repeat) ? GPU_REPEAT : GPU_CLAMP_TO_EDGE;
 		C3D_TexSetFilter(&tex->tex, f, f);
 		C3D_TexSetWrap(&tex->tex, w, w);
-		C3D_TexBind(0, &tex->tex);
+		C3D_TexBind(1, &tex->tex); // Unit 0 is reserved for the shadow map.
 	}
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, uv_scale.x, uv_scale.y, uv_offset.x, uv_offset.y);
 	if (use_vertex_color) {
@@ -563,8 +578,8 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 	C3D_TexEnvColor(e0, color_to_abgr(m.albedo));
 	GPU_TEVSRC base = unshaded ? GPU_CONSTANT : GPU_FRAGMENT_PRIMARY_COLOR;
 	if (tex) {
-		C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
-		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
+		C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
 	} else {
 		C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
@@ -661,15 +676,121 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 	}
 }
 
-void RasterizerSceneCitro3D::_draw_list(LocalVector<DrawItem> &p_list, const Transform3D &p_view, bool p_transparent) {
+void RasterizerSceneCitro3D::_draw_item_geometry(const DrawItem &p_item, const Transform3D &p_view) {
 	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	C3D_Mtx mv;
+	_transform_to_mtx(p_view * p_item.model, &mv);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mv);
+	C3D_BufInfo *bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, p_item.vertices, sizeof(Vertex), 4, 0x3210);
+	if (p_item.surface->indices) {
+		C3D_DrawElements(GPU_TRIANGLES, p_item.surface->index_count, C3D_UNSIGNED_SHORT, p_item.surface->indices);
+	} else {
+		C3D_DrawArrays(GPU_TRIANGLES, 0, p_item.surface->vertex_count);
+	}
+}
+
+void RasterizerSceneCitro3D::_draw_list(LocalVector<DrawItem> &p_list, const Transform3D &p_view, bool p_transparent) {
 	for (const DrawItem &item : p_list) {
 		_apply_material(item, p_transparent);
+		_draw_item_geometry(item, p_view);
+	}
+}
 
+bool RasterizerSceneCitro3D::_render_shadow_map(const PagedArray<RID> &p_lights, const CameraData *p_camera_data) {
+	LightStorage *ls = LightStorage::get_singleton();
+	LightInstance *li = nullptr;
+	Light *light = nullptr;
+	for (uint32_t i = 0; i < p_lights.size(); i++) {
+		LightInstance *cand = ls->get_light_instance(p_lights[i]);
+		Light *l = cand ? ls->get_light(cand->light) : nullptr;
+		if (l && l->shadow && l->type == RSE::LIGHT_DIRECTIONAL) {
+			li = cand;
+			light = l;
+			shadow_light_instance = p_lights[i];
+			break;
+		}
+	}
+	if (!li) {
+		return false;
+	}
+
+	int size = CLAMP(Math::next_power_of_2((uint32_t)(int)GLOBAL_GET_CACHED(int, "rendering/3ds/shadows/size")), 128u, 1024u);
+	if (size != shadow_size || !shadow_target) {
+		if (shadow_target) {
+			return false; // Size changes take a restart (no deletes mid-frame).
+		}
+		if (!C3D_TexInitShadow(&shadow_tex, size, size)) {
+			ERR_PRINT_ONCE("3DS: out of VRAM for the shadow map.");
+			return false;
+		}
+		shadow_target = C3D_RenderTargetCreateFromTex(&shadow_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+		if (!shadow_target) {
+			C3D_TexDelete(&shadow_tex);
+			return false;
+		}
+		shadow_size = size;
+		// Outside the map counts as lit.
+		shadow_tex.border = 0xFFFFFFFF;
+		C3D_TexSetWrap(&shadow_tex, GPU_CLAMP_TO_BORDER, GPU_CLAMP_TO_BORDER);
+		C3D_TexSetFilter(&shadow_tex, GPU_NEAREST, GPU_NEAREST);
+	}
+
+	// An orthographic box around the part of the view nearest the camera.
+	float max_dist = MIN(light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE], (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/max_distance"));
+	max_dist = MAX(max_dist, 1.0f);
+	const Transform3D &cam = p_camera_data->main_transform;
+	Vector3 center = cam.origin - cam.basis.get_column(2) * (max_dist * 0.5f);
+	float radius = max_dist * 0.6f;
+	Basis lb = li->transform.basis.orthonormalized();
+	// Snap the center to shadow texels so edges don't crawl as the camera moves.
+	float texel = (radius * 2.0f) / size;
+	Vector3 lc = lb.xform_inv(center);
+	lc.x = Math::floor(lc.x / texel) * texel;
+	lc.y = Math::floor(lc.y / texel) * texel;
+	center = lb.xform(lc);
+	// Depth is only 8 bits (alpha), so keep the light's depth range tight:
+	// just the sphere around the shadowed area.
+	Transform3D light_view = Transform3D(lb, center + lb.get_column(2) * radius * 1.1f).affine_inverse();
+	Projection proj;
+	proj.set_orthogonal(-radius, radius, -radius, radius, 0.05f, radius * 2.2f);
+	shadow_projview = proj * Projection(light_view);
+
+	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	C3D_FrameSplit(0);
+	C3D_RenderTargetClear(shadow_target, C3D_CLEAR_ALL, 0xFFFFFFFF, 0); // Far depth, far alpha.
+	C3D_FrameDrawOn(shadow_target);
+	C3D_SetViewport(0, 0, size, size);
+
+	// Casters write their light-space depth into alpha (RGB white); a
+	// regular depth buffer keeps the nearest one. Same technique as
+	// devkitPro's 3ds-examples shadow_mapping.
+	r->bind_shadow_program();
+	C3D_Mtx pm;
+	projection_to_c3d(proj, &pm);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->shadow_uniforms.projection, &pm);
+	C3D_LightEnvBind(nullptr);
+	C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+	C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(e0);
+	C3D_TexEnvColor(e0, 0xFFFFFFFF);
+	C3D_TexEnvSrc(e0, C3D_RGB, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+	C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
+	C3D_TexEnvSrc(e0, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
+	for (int i = 1; i < 6; i++) {
+		C3D_TexEnvInit(C3D_GetTexEnv(i));
+	}
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+
+	for (const DrawItem &item : opaque_list) {
 		C3D_Mtx mv;
-		_transform_to_mtx(p_view * item.model, &mv);
-		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mv);
-
+		_transform_to_mtx(light_view * item.model, &mv);
+		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->shadow_uniforms.model_view, &mv);
 		C3D_BufInfo *bi = C3D_GetBufInfo();
 		BufInfo_Init(bi);
 		BufInfo_Add(bi, item.vertices, sizeof(Vertex), 4, 0x3210);
@@ -679,6 +800,30 @@ void RasterizerSceneCitro3D::_draw_list(LocalVector<DrawItem> &p_list, const Tra
 			C3D_DrawArrays(GPU_TRIANGLES, 0, item.surface->vertex_count);
 		}
 	}
+	return true;
+}
+
+void RasterizerSceneCitro3D::_set_shadow_matrix(const Transform3D &p_view) {
+	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	C3D_Mtx m = {};
+	if (shadow_active) {
+		// Godot clip space of the light -> (u, v, depth) as the shadow pass
+		// stored it: u = x/2 + 1/2, v = 1/2 - y/2 (top row at v = 0),
+		// depth = z/2 + 1/2.
+		Projection bias;
+		bias.columns[0] = Vector4(0.5, 0, 0, 0);
+		bias.columns[1] = Vector4(0, -0.5, 0, 0);
+		bias.columns[2] = Vector4(0, 0, 0.5, 0);
+		bias.columns[3] = Vector4(0.5, 0.5, 0.5, 1);
+		Projection full = bias * shadow_projview * Projection(p_view.affine_inverse());
+		for (int row = 0; row < 3; row++) {
+			m.r[row].x = full.columns[0][row];
+			m.r[row].y = full.columns[1][row];
+			m.r[row].z = full.columns[2][row];
+			m.r[row].w = full.columns[3][row];
+		}
+	}
+	C3D_FVUnifMtx3x4(GPU_VERTEX_SHADER, r->scene_uniforms.shadow_mtx, &m);
 }
 
 void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
@@ -747,6 +892,14 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 		convergence = MAX(r->get_stereo_convergence(), 0.01f);
 	}
 
+	shadow_active = _render_shadow_map(p_lights, p_camera_data);
+	if (shadow_active) {
+		C3D_TexBind(0, &shadow_tex);
+		C3D_TexShadowParams(false, (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/bias"));
+	} else {
+		C3D_TexBind(0, nullptr);
+	}
+
 	for (int eye = 0; eye < eyes; eye++) {
 		if (!ts->render_target_begin(rt, eye)) {
 			continue;
@@ -779,6 +932,7 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 			}
 		}
 		_setup_lights(p_lights, eye_view, p_camera_data->main_transform.origin, ambient);
+		_set_shadow_matrix(eye_view);
 		_draw_list(opaque_list, eye_view, false);
 		_draw_list(transparent_list, eye_view, true);
 	}
@@ -787,6 +941,8 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 	ts->render_target_disable_clear_request(rb->render_target);
 
 	// The canvas draws next with its own buffers and state.
+	C3D_TexBind(0, nullptr);
+	C3D_TexBind(1, nullptr);
 	C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
 	C3D_LightEnvBind(nullptr);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);

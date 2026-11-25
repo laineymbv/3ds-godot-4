@@ -41,6 +41,7 @@
 
 #include "platform/3ds/rendering/shaders/canvas.v.pica.gen.h"
 #include "platform/3ds/rendering/shaders/scene.v.pica.gen.h"
+#include "platform/3ds/rendering/shaders/shadow.v.pica.gen.h"
 
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
@@ -139,11 +140,18 @@ void RasterizerCitro3D::initialize() {
 	scene_uniforms.uv_transform = shaderInstanceGetUniformLocation(scene_program.vertexShader, "uvTransform");
 	scene_uniforms.color_scale = shaderInstanceGetUniformLocation(scene_program.vertexShader, "colorScale");
 	scene_uniforms.color_bias = shaderInstanceGetUniformLocation(scene_program.vertexShader, "colorBias");
+	scene_uniforms.shadow_mtx = shaderInstanceGetUniformLocation(scene_program.vertexShader, "shadowMtx");
 
 	canvas_dvlb = _load_shader(shader_canvas_shbin, shader_canvas_shbin_size, &canvas_shbin);
 	shaderProgramInit(&canvas_program);
 	shaderProgramSetVsh(&canvas_program, &canvas_dvlb->DVLE[0]);
 	canvas_uniforms.projection = shaderInstanceGetUniformLocation(canvas_program.vertexShader, "projection");
+
+	shadow_dvlb = _load_shader(shader_shadow_shbin, shader_shadow_shbin_size, &shadow_shbin);
+	shaderProgramInit(&shadow_program);
+	shaderProgramSetVsh(&shadow_program, &shadow_dvlb->DVLE[0]);
+	shadow_uniforms.projection = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "projection");
+	shadow_uniforms.model_view = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "modelView");
 
 	stream_vertices = (CanvasVertex *)linearAlloc(sizeof(CanvasVertex) * STREAM_VERTICES);
 	stream_indices = (uint16_t *)linearAlloc(sizeof(uint16_t) * STREAM_INDICES);
@@ -178,6 +186,11 @@ void RasterizerCitro3D::finalize() {
 	}
 	shaderProgramFree(&scene_program);
 	shaderProgramFree(&canvas_program);
+	shaderProgramFree(&shadow_program);
+	if (shadow_dvlb) {
+		DVLB_Free(shadow_dvlb);
+		memfree(shadow_shbin);
+	}
 	if (scene_dvlb) {
 		DVLB_Free(scene_dvlb);
 		memfree(scene_shbin);
@@ -201,6 +214,20 @@ void RasterizerCitro3D::bind_scene_program() {
 	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2); // uv
 	AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4); // color
 	bound_program = 0;
+}
+
+void RasterizerCitro3D::bind_shadow_program() {
+	if (bound_program == 2) {
+		return;
+	}
+	C3D_BindProgram(&shadow_program);
+	C3D_AttrInfo *ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3); // Same vertex layout as the scene.
+	AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4);
+	bound_program = 2;
 }
 
 void RasterizerCitro3D::bind_canvas_program() {

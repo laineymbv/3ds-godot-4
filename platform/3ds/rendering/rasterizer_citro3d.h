@@ -84,6 +84,9 @@ class RasterizerCitro3D : public RendererCompositor {
 	// Shaders.
 	void *scene_shbin = nullptr;
 	void *canvas_shbin = nullptr;
+	void *shadow_shbin = nullptr;
+	DVLB_s *shadow_dvlb = nullptr;
+	shaderProgram_s shadow_program;
 	DVLB_s *scene_dvlb = nullptr;
 	DVLB_s *canvas_dvlb = nullptr;
 	shaderProgram_s scene_program;
@@ -127,10 +130,16 @@ public:
 		int uv_transform = -1;
 		int color_scale = -1;
 		int color_bias = -1;
+		int shadow_mtx = -1;
 	} scene_uniforms;
 	struct {
 		int projection = -1;
 	} canvas_uniforms;
+	struct {
+		int projection = -1;
+		int model_view = -1;
+	} shadow_uniforms;
+	void bind_shadow_program();
 
 	void bind_scene_program();
 	void bind_canvas_program();

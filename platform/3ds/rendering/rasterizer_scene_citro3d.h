@@ -117,6 +117,18 @@ private:
 	Color sky_ambient;
 	bool _draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, Color &r_ambient);
 
+	// Shadows: one directional light, an orthographic shadow map around the
+	// camera, rendered in the PICA200's shadow mode and read by the lighting
+	// unit through texture unit 0 (albedo textures use unit 1).
+	C3D_Tex shadow_tex;
+	C3D_RenderTarget *shadow_target = nullptr;
+	int shadow_size = 0;
+	bool shadow_active = false;
+	RID shadow_light_instance;
+	Projection shadow_projview; // Godot-style projection * light view.
+	bool _render_shadow_map(const PagedArray<RID> &p_lights, const CameraData *p_camera_data);
+	void _set_shadow_matrix(const Transform3D &p_view);
+
 	C3D_FogLut fog_lut;
 	struct FogKey {
 		int mode = -1;
@@ -128,6 +140,7 @@ private:
 	void _add_mesh(GeometryInstanceCitro3D *p_gi, RID p_mesh, const Transform3D &p_model, const Color &p_color, float p_depth);
 	void _fill_draw_lists(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances);
 	void _setup_lights(const PagedArray<RID> &p_lights, const Transform3D &p_view, const Vector3 &p_cam_pos, const Color &p_ambient);
+	void _draw_item_geometry(const DrawItem &p_item, const Transform3D &p_view);
 	void _draw_list(LocalVector<DrawItem> &p_list, const Transform3D &p_view, bool p_transparent);
 	void _apply_material(const DrawItem &p_item, bool p_transparent);
 

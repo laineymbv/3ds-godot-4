@@ -6,17 +6,21 @@
 .fvec uvTransform    ; xy = scale, zw = offset
 .fvec colorScale     ; vertex color is color * colorScale + colorBias,
 .fvec colorBias      ; so (1,0) uses COLOR and (0,1) ignores it.
+.fvec shadowMtx[3]   ; view space -> shadow map (u, v, depth)
 
 ; Constants
 .constf myconst(0.0, 1.0, -1.0, 0.5)
 .constf bytescale(0.00392156862745098, 0.0, 0.0, 0.0)
+.constf depthclamp(0.995, 0.0, 0.0, 0.0)
 .alias  zeros myconst.xxxx
 .alias  ones  myconst.yyyy
 .alias  half  myconst.wwww
 
 ; Outputs
 .out outpos position
-.out outtc0 texcoord0
+.out outtc0 texcoord0.st ; shadow map coordinates (texture unit 0)
+.out -      texcoord0w outtc0.p ; shadow reference depth
+.out outtc1 texcoord1   ; albedo UVs (texture unit 1)
 .out outclr color
 .out outview view
 .out outnq normalquat
@@ -48,7 +52,16 @@
 	mov r2, intex
 	mul r2.xy, uvTransform.xy, r2.xy
 	add r2.xy, uvTransform.zw, r2.xy
-	mov outtc0, r2
+	mov outtc1, r2
+
+	; Shadow map lookup: (u, v) and the depth to compare against.
+	dp4 r7.x, shadowMtx[0], r1
+	dp4 r7.y, shadowMtx[1], r1
+	dp4 r7.z, shadowMtx[2], r1
+	; Beyond the light's far plane nothing casts: keep it lit.
+	min r7.z, depthclamp.xxxx, r7.z
+	mov r7.w, ones
+	mov outtc0, r7
 
 	; vertex color (bytes) -> [0,1], then the scale/bias switch.
 	mul r3, bytescale.xxxx, inclr

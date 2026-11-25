@@ -174,6 +174,12 @@ renderer maps Godot's built-in materials onto it:
   takes its color), and fog (exponential and depth modes) on the PICA fog
   unit.
 - Mipmaps for textures imported with mipmaps (the 3D default).
+- Shadows from the first `DirectionalLight3D` with shadows enabled: an
+  orthographic shadow map (`rendering/3ds/shadows/size`, default 512) around
+  the camera out to `rendering/3ds/shadows/max_distance` (default 20), read
+  by the PICA200 lighting unit (only that light is darkened, as in Godot).
+  Depth is 8-bit, so `rendering/3ds/shadows/bias` (default 0.012) trades
+  acne against peter-panning. Casters are the meshes the camera sees.
 - `MultiMesh` (per-instance color), `CPUParticles3D` and `CPUParticles2D`.
 - Skeletons and blend shapes, skinned on the CPU (the PICA200 has uniform
   room for only ~28 bone matrices).
@@ -186,7 +192,7 @@ renderer maps Godot's built-in materials onto it:
   pipeline. A warning is printed once.
 
 Not implemented yet: GPU particles (need compute shaders: use CPUParticles),
-2D skeletons, shadows, 2D lights, sun disk/clouds in the procedural sky,
+2D skeletons, omni/spot light shadows, 2D lights, sun disk/clouds in the procedural sky,
 reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.
 
 ## Other limitations

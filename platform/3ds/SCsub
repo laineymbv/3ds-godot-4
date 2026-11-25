@@ -33,7 +33,7 @@ def build_pica_header(target, source, env):
         f.write("static const uint32_t shader_%s_shbin_size = %d;\n" % (name, len(data)))
 
 
-for shader in ["scene", "canvas"]:
+for shader in ["scene", "canvas", "shadow"]:
     env_3ds.Command(
         "rendering/shaders/%s.v.pica.gen.h" % shader,
         "rendering/shaders/%s.v.pica" % shader,
