@@ -1,154 +1,179 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>3DS platform guide - Godot for the Nintendo 3DS</title><link rel="stylesheet" href="style.css"></head>
-<body><div class="layout"><nav><a class="brand" href="index.html">Godot for the Nintendo 3DS</a></nav><main><h1>3DS platform guide</h1><p>Godot 4.7 export template for the Nintendo 3DS (homebrew: devkitARM, libctru,
-citro3d). The engine runs GDScript projects from a <code>.pck</code> stored in the
-<code>.3dsx</code> RomFS, renders 3D with stereoscopic output on the top screen, and uses
-the bottom screen as a second window with touch input.</p>
-<h2 id="building">Building</h2>
-<p>Builds run in Docker (devkitARM + SCons):</p>
-<pre><code class="language-sh">platform/3ds/build.sh target=template_release   # or template_debug
-</code></pre>
-<p>Output: <code>bin/godot.3ds.&lt;target&gt;.arm32.elf</code> and <code>.3dsx</code>. Builds use
-full LTO and <code>-Oz</code> by default (release template about 20.5 MB). Add <code>lto=none</code> for faster iteration.</p>
-<p>Options (pass to <code>build.sh</code>):</p>
+<body><div class="layout"><nav><a class="brand" href="index.html">Godot for the Nintendo 3DS</a></nav><main><h1>3DS platform guide</h1><p>This is Godot 4.7 for the Nintendo 3DS: an export template built with
+devkitARM, libctru and citro3d, plus an editor that can export for it. Your
+game is GDScript and scenes, the same as on any other platform. What's
+different is the hardware, so this guide covers the 3DS specifically:</p>
 <ul>
-<li><code>linear_heap_mb=N</code> fixes the GPU-visible heap (textures, meshes, audio).
-  By default it is 30% of the memory free at start, 8-32 MiB, so the same
-  build fits a 64 MB Homebrew Launcher slot and a 124 MB New 3DS CIA.</li>
+<li>two screens, one of which is a second window with touch input</li>
+<li>stereoscopic 3D on the top screen, and 2D depth</li>
+<li>the console's input (buttons, circle pad, touch, motion)</li>
+<li>the renderer, and what the PICA200 graphics chip can and can't do</li>
+<li>audio, files, networking, threads, and the memory budget</li>
+<li>building, exporting (<code>.3dsx</code> and <code>.cia</code>), and debugging</li>
 </ul>
-<h2 id="original-3ds-64-mb-268-mhz">Original 3DS (64 MB, 268 MHz)</h2>
-<p>The same template runs on the original 3DS and 2DS, with less room: about
-44 MB are free after the 20 MB of code, and the CPU is three times slower
-(the GPU is the same). What helps:</p>
+<p>Start with <a href="#quick-start">Quick start</a>. The rest is reference, in roughly the
+order you'll need it.</p>
+<h2 id="contents">Contents</h2>
 <ul>
-<li><strong>Smaller template.</strong> <code>tools/make_profile.py</code> scans a project (scenes,
-  scripts, imported models) and writes a build profile that leaves out the
-  node classes it never uses:</li>
+<li><a href="#quick-start">Quick start</a></li>
+<li><a href="#screens-and-windows-dual-screen">Screens and windows (dual screen)</a></li>
+<li><a href="#stereoscopic-3d">Stereoscopic 3D</a></li>
+<li><a href="#2d-depth">2D depth</a></li>
+<li><a href="#input">Input</a></li>
+<li><a href="#the-nintendo3ds-singleton">The <code>Nintendo3DS</code> singleton</a></li>
+<li><a href="#renderer">Renderer</a></li>
+<li><a href="#custom-spatial-shaders">Custom spatial shaders</a></li>
+<li><a href="#textures">Textures</a></li>
+<li><a href="#audio">Audio</a></li>
+<li><a href="#files-saves-and-paths">Files, saves and paths</a></li>
+<li><a href="#networking">Networking</a></li>
+<li><a href="#threads">Threads</a></li>
+<li><a href="#memory-and-the-original-3ds">Memory and the original 3DS</a></li>
+<li><a href="#building-the-template">Building the template</a></li>
+<li><a href="#exporting-from-the-editor">Exporting from the editor</a></li>
+<li><a href="#running-logs-and-debugging">Running, logs and debugging</a></li>
+<li><a href="#limitations">Limitations</a></li>
+<li><a href="#class-reference">Class reference</a></li>
+<li><a href="#porting-notes">Porting notes</a></li>
 </ul>
-<pre><code class="language-sh">python3 platform/3ds/tools/make_profile.py ~/game --godot bin/godot.linuxbsd.editor.x86_64 -o bin/profiles/game.json
-platform/3ds/build.sh target=template_release build_profile=bin/profiles/game.json
-</code></pre>
-<p>The platformer's template went from 20.5 to 17.8 MB this way. The profile
-  must be inside the Godot folder (the build runs in Docker). A class the scan
-  can't see, such as one built from a string, goes in <code>--keep</code>; the game
-  prints "Cannot get class" if one is missing. Several games can share one
-  template with <code>--also-project</code>.
-- <strong>16-bit textures.</strong> <code>rendering/3ds/textures/format</code>: Auto (default) stores
-  textures as RGB565, RGBA5551 or RGBA4444 on the original 3DS and in full
-  RGBA8 on the New 3DS; "16-bit" and "Full" force one. Half the texture
-  memory, dithered. <code>Image</code> readback returns RGBA8 either way.
-- <strong>Rehearsing the memory budget.</strong> <code>app_memory_limit_mb=40</code> builds a template
-  that uses at most 40 MB for heap + linear heap, even in an emulator or on a
-  New 3DS. The platformer runs normally at 40 and at 28 MB; at 22 it runs out.
-  Azahar's CPU timing isn't accurate, so speed still needs real hardware.
-- <code>Nintendo3DS.is_new_3ds()</code> lets a game scale effects down (fewer particles,
-  shadows off) on the slower CPU.</p>
-<h2 id="making-a-game">Making a game</h2>
-<h3 id="from-the-editor-recommended">From the editor (recommended)</h3>
-<p>Build an editor from this fork once (it adds the <strong>Nintendo 3DS</strong> export
-platform and knows the <code>Nintendo3DS</code> class):</p>
-<pre><code class="language-sh">python3 -m venv .venv &amp;&amp; .venv/bin/pip install scons
-.venv/bin/scons platform=linuxbsd target=editor -j$(nproc)
-platform/3ds/build.sh target=template_release
-platform/3ds/build.sh target=template_debug
-platform/3ds/install_templates.sh
-</code></pre>
-<p>Then in the editor: Project &gt; Export &gt; Add &gt; Nintendo 3DS, and export to a
-<code>.3dsx</code> or <code>.cia</code> file name.</p>
-<ul>
-<li><code>.3dsx</code> is written directly (template code + SMDH title/icon + a RomFS with
-  the project's <code>.pck</code>); no external tools.</li>
-<li><code>.cia</code> needs makerom and bannertool: set their paths in Editor Settings &gt;
-  Export &gt; 3DS. Banner image/sound, unique id and product code are preset
-  options (defaults: the icon on a dark plate, silence, derived from the
-  title).</li>
-<li>Preset options: title, description, author, icon (defaults to the project
-  icon), custom templates.</li>
-<li>Lossless (WebP), Lossy and VRAM Compressed texture imports all load.</li>
-<li>Textures imported as VRAM Compressed export as S3TC and are decompressed on
-  the 3DS at load (<code>bcdec</code>); Lossless/Lossy import is faster to load.</li>
-</ul>
-<p><code>install_templates.sh</code> copies <code>bin/godot.3ds.template_*</code> to
-<code>~/.local/share/godot/export_templates/&lt;version&gt;/3ds_{debug,release}.{3dsx,elf}</code>
-(the <code>.elf</code> is used for CIAs). Pass a directory to install elsewhere, e.g.
-<code>bin/editor_data/export_templates</code> for a self-contained editor (<code>bin/._sc_</code>).</p>
-<h3 id="from-the-command-line">From the command line</h3>
+<h2 id="quick-start">Quick start</h2>
 <ol>
-<li>Export the project as a pack (<code>.pck</code>) with any desktop preset, or headless:
-   <code>godot --headless --path &lt;project&gt; --export-pack &lt;preset&gt; game.pck</code>.</li>
-<li>Bundle it with the template:
-   <code>platform/3ds/make_game.sh [--title T] [--icon icon.png] game.pck game.3dsx</code>
-   or <code>... game.pck game.cia</code> (also <code>--banner</code>, <code>--author</code>, <code>--id</code>; needs
-   makerom and bannertool). Run it without arguments for all options.</li>
+<li>Build the editor and the templates (see <a href="#building-the-template">Building the template</a>).</li>
+<li>In the editor: <strong>Project &gt; Export &gt; Add &gt; Nintendo 3DS</strong>. Export to a file
+   ending in <code>.3dsx</code> (runs from the Homebrew Launcher) or <code>.cia</code> (installs with FBI).</li>
+<li>Copy the file to the console: a <code>.3dsx</code> goes to <code>sdmc:/3ds/</code>, and you start
+   it from the Homebrew Launcher. A <code>.cia</code> is installed with FBI.</li>
 </ol>
-<p>With the fork's editor, <code>--export-release "&lt;3DS preset&gt;" game.3dsx</code> works
-headless too.</p>
-<h3 id="running">Running</h3>
-<p>Copy a <code>.3dsx</code> to <code>sdmc:/3ds/</code> and start it from the Homebrew Launcher, or
-install a <code>.cia</code> with FBI.</p>
-<p>A <code>.3dsx</code> gets whatever memory the launcher has (usually 64 MB). A <code>.cia</code>
-runs in 64 MB on the original 3DS and in 124 MB at 804 MHz on the New 3DS.
-The main thread gets a 1 MB stack.</p>
-<p>Godot's output goes to <code>sdmc:/3ds/godot/stdout.txt</code>; <code>user://</code> is
-<code>sdmc:/3ds/godot/app_userdata/&lt;project name&gt;/</code>.</p>
-<h2 id="remote-debugging-and-one-click-run">Remote debugging and one-click run</h2>
-<p>Debug templates honor <code>--remote-debug tcp://&lt;pc&gt;:6007</code> and other Godot
-arguments, taken from the launcher (3dslink) and from
-<code>sdmc:/3ds/godot/args.txt</code> (one argument per line).</p>
-<p>In the fork's editor, set Editor Settings &gt; Export &gt; 3DS &gt; 3dslink (the
-devkitPro tool) and optionally Console Address. A "Run on 3DS" button then
-appears for the 3DS preset: press Y in the Homebrew Launcher, click the
-button, and the game starts with the editor's debugger, output and remote
-scene tree connected.</p>
-<h2 id="screens-and-windows">Screens and windows</h2>
+<p>Set the two project settings that every 3DS game needs, described in
+<a href="#screens-and-windows-dual-screen">Screens and windows</a>:</p>
+<pre><code>window/size/viewport_width=400
+window/size/viewport_height=240
+window/subwindows/embed_subwindows=false
+</code></pre>
+<h2 id="screens-and-windows-dual-screen">Screens and windows (dual screen)</h2>
+<p>The 3DS has two screens, and Godot treats them as two windows:</p>
 <ul>
-<li>The main window is the top screen (400x240). Set the project's viewport size
-  to 400x240.</li>
-<li>The bottom screen (320x240) is any other <code>Window</code>. Set
-  <code>display/window/subwindows/embed_subwindows=false</code> so windows are real
-  display windows, and <code>current_screen = 1</code> on the bottom one.</li>
-<li>Touches go to the bottom-screen window as <code>InputEventScreenTouch/Drag</code>
-  (and emulated mouse events). With no bottom window they go to the top one.</li>
+<li>The <strong>top screen</strong> (400 x 240) is the main window. Its viewport is your
+  game's 3D and 2D scene, and it renders one image per eye in stereo.</li>
+<li>The <strong>bottom screen</strong> (320 x 240) is any other <code>Window</code> you add. It shows
+  whatever you put in it, and it receives the touch screen.</li>
 </ul>
+<p>Three things make it work:</p>
+<ol>
+<li><strong>Set the main viewport to 400 x 240</strong> (<code>window/size/viewport_width</code> and
+   <code>viewport_height</code>). The top screen's size is fixed, so the game should fill
+   it.</li>
+<li><strong>Turn off embedded sub-windows</strong> (<code>window/subwindows/embed_subwindows=false</code>).
+   Without this, a <code>Window</code> is drawn inside the main window, not on the
+   other screen.</li>
+<li><strong>Move the window to the bottom screen</strong> by setting <code>current_screen = 1</code> on it.
+   Screen 0 is the top screen (the default), and screen 1 is the bottom one.</li>
+</ol>
+<h3 id="worked-example-a-bottom-screen-menu">Worked example: a bottom-screen menu</h3>
+<p>The scene tree:</p>
+<pre><code>Main (Node3D or Node2D, your game)
+├── Camera3D, Lights, World...
+└── Bottom (Window, size 320x240, borderless)
+    ├── Background (ColorRect, full size)
+    ├── Title (Label)
+    └── Buttons (VBoxContainer with Button children)
+</code></pre>
+<p>In <code>main.gd</code>, on the main node:</p>
+<pre><code class="language-gdscript">extends Node3D
+
+@onready var bottom: Window = $Bottom
+
+func _ready() -&gt; void:
+    bottom.current_screen = 1          # put the window on the bottom screen
+    bottom.borderless = true           # no title bar; it's a screen, not a window
+    ($Bottom/Buttons/Start as Button).pressed.connect(_on_start)
+
+func _on_start() -&gt; void:
+    print(&quot;Start pressed&quot;)
+</code></pre>
+<p>Things to know about the bottom window:</p>
+<ul>
+<li>It's a normal <code>Window</code>, so anything you can put in a window works in it:
+  Controls, Labels, Buttons, sprites, a second <code>SubViewport</code>.</li>
+<li>Its contents are <strong>2D</strong>. It doesn't see your 3D world unless you render the
+  world into a <code>SubViewport</code> and show that in a <code>TextureRect</code>.</li>
+<li><strong>Touch</strong> goes to the bottom window as <code>InputEventScreenTouch</code> and
+  <code>InputEventScreenDrag</code>, and also as emulated mouse events, so Buttons,
+  sliders and text fields respond to the stylus with no extra code.</li>
+<li>If you don't create a bottom window, touches go to the top window.</li>
+<li><strong>Hiding it</strong> is <code>bottom.visible = false</code>. The top screen then fills its own
+  screen as usual.</li>
+</ul>
+<p>The platformer uses this pattern for its HUD (<code>scenes/hud.tscn</code> is a
+borderless <code>Window</code>, and <code>level.gd</code> sets <code>current_screen = 1</code>). The launcher
+(a separate project) uses it for its game list.</p>
+<h3 id="showing-things-on-both-screens">Showing things on both screens</h3>
+<p>Anything on the top screen is drawn by the main window. To show a copy on the
+bottom screen too, render it into a <code>SubViewport</code> and display that
+<code>ViewportTexture</code> in the bottom window's <code>TextureRect</code>. It costs a second
+render, so keep it small.</p>
+<h3 id="checking-whats-on-screen">Checking what's on screen</h3>
+<p><code>Nintendo3DS.save_screens(dir)</code> writes <code>top_left.png</code>, <code>top_right.png</code> (the two
+eyes) and <code>bottom.png</code> into <code>dir</code>. Use it with <code>OS.get_user_data_dir()</code> and
+look at the files to check a layout without a camera or a real console.</p>
 <h2 id="stereoscopic-3d">Stereoscopic 3D</h2>
-<p>The top screen's viewport renders one image per eye whenever the 3D slider is
-up; with the slider down only one image is drawn. Each <code>Camera3D</code> is offset
-sideways and its frustum sheared so objects at the convergence distance sit
-on the screen plane; nearer objects come out of the screen.</p>
+<p>The 3D slider on the console's right side controls depth. The top screen
+renders one image for each eye whenever the slider is up, and one image when
+it's down.</p>
 <ul>
-<li><code>rendering/3ds/stereo/max_separation</code> (default 0.12): eye separation in world
-  units at full slider.</li>
-<li><code>rendering/3ds/stereo/convergence</code> (default 3.0): distance from the camera
-  with zero parallax.</li>
+<li><strong>Cameras.</strong> Each <code>Camera3D</code> is offset sideways per eye, and its frustum is
+  sheared so that objects at the convergence distance sit on the screen
+  plane. Objects nearer than that come out of the screen, and farther ones
+  go into it.</li>
+<li><strong>Project settings:</strong></li>
+<li><code>rendering/3ds/stereo/max_separation</code> (default <code>0.12</code>): the eye separation
+    in world units at full slider.</li>
+<li><code>rendering/3ds/stereo/convergence</code> (default <code>3.0</code>): the distance from the
+    camera with zero parallax.</li>
+<li><strong>Per scene.</strong> <code>Nintendo3DS.set_stereo_separation(x)</code> and
+  <code>Nintendo3DS.set_stereo_convergence(x)</code> override the project settings for
+  the scene you're in. Pass a negative value to go back to the settings.</li>
+<li><strong>Off the slider.</strong> At <code>0.0</code> the scene draws once, with no depth, and costs
+  less. Test your game with the slider down too.</li>
 </ul>
-<p>2D canvas items draw at zero parallax (on the screen plane) unless given a
-depth.</p>
-<h3 id="manual-depth-for-2d">Manual depth for 2D</h3>
-<p>Any <code>CanvasItem</code> (and so a whole HUD or layer of sprites) can sit in front of
-or behind the screen. Depth is in pixels of disparity at full slider: <code>+</code> pops
-out, <code>-</code> sinks in, <code>0</code> is the screen plane. Each eye sees the item shifted
-sideways by half of it times the slider, rounded to whole pixels so text and
-sprites stay sharp. Keep depths small (about -6 to +6); big shifts hurt to
-look at.</p>
+<p>2D drawing is flat: 2D canvas items sit on the screen plane. To move them,
+see the next section.</p>
+<h2 id="2d-depth">2D depth</h2>
+<p>Any <code>CanvasItem</code> (a Control, a Sprite2D, a Label, or a whole HUD) can sit in
+front of or behind the screen plane. Depth is measured in <strong>pixels of
+disparity at full slider</strong>: positive pops out, negative sinks in, and <code>0.0</code> is
+the screen plane. Each eye sees the item shifted sideways by half the depth,
+times the slider, rounded to whole pixels so text and sprites stay sharp. Keep
+depths small (about <code>-6</code> to <code>+6</code>); big shifts are hard to look at.</p>
 <pre><code class="language-gdscript">var n3ds = Engine.get_singleton(&quot;Nintendo3DS&quot;)
 n3ds.set_depth($Hud, 3.0)           # the HUD and everything under it
-n3ds.set_depth($Sky, -5.0, false)   # this item only
+n3ds.set_depth($Sky, -5.0, false)   # only this item
+print(n3ds.get_depth($Hud))         # 3.0
 </code></pre>
-<p>In the editor, select any <code>CanvasItem</code> and use the <strong>Stereo Depth</strong> row in the
-Inspector (slider in pixels, undoable). It sets the same value as
-<code>set_depth</code>, so it's saved with the scene. The row is read-only when the item
-inherits its parent's material, or has a material that isn't the depth one.
-Full reference: the <code>Nintendo3DS</code> and <code>EditorExportPlatform3DS</code> class pages in
-the editor's Help (source: <code>doc_classes/</code>).</p>
-<p><code>set_depth</code> gives the item a <code>ShaderMaterial</code> with a <code>stereo_depth</code> parameter;
-descendants without a material of their own use it too (<code>use_parent_material</code>).
-A descendant with its own material keeps it and sits at depth 0, unless you
-call <code>set_depth</code> on it. In the editor you can do the same by hand: assign a
-<code>ShaderMaterial</code> whose canvas_item shader declares <code>uniform float
-stereo_depth;</code>, and animate or tween that parameter. A clipped item's clip
-rectangle moves with it.</p>
+<p>How it works: <code>set_depth</code> gives the item a <code>ShaderMaterial</code> with a
+<code>stereo_depth</code> parameter. Children without a material of their own use that
+material (<code>use_parent_material</code>), so a whole subtree shares the depth. A child
+with its own material keeps it and sits at depth <code>0</code>, unless you call
+<code>set_depth</code> on it too. A clipped item's clip rectangle moves with it.</p>
+<p><strong>Warning:</strong> <code>set_depth</code> replaces a material the item already has (it prints a
+warning when it does). If the item has its own material, add a
+<code>stereo_depth</code> uniform to that material yourself instead.</p>
+<h3 id="in-the-editor">In the editor</h3>
+<p>Select any <code>CanvasItem</code>. The Inspector has a <strong>Stereo Depth</strong> row (a slider in
+pixels). It sets the same value as <code>set_depth</code>, it's undoable, and it's saved
+with the scene. The row is read-only when the item inherits its parent's
+material (set the depth on the parent instead), or has a material of its own.</p>
+<h3 id="by-hand">By hand</h3>
+<p>Assign a <code>ShaderMaterial</code> with this shader to any canvas item, and set the
+<code>stereo_depth</code> value (you can animate it or tween it):</p>
+<pre><code class="language-glsl">shader_type canvas_item;
+uniform float stereo_depth = 0.0;
+void fragment() {}
+</code></pre>
 <h2 id="input">Input</h2>
-<p>Joypad device 0, mapped by position like every other Godot platform:</p>
+<p>The 3DS is a joypad (device 0), mapped by position like every other Godot
+platform:</p>
 <table>
 <thead>
 <tr>
@@ -175,7 +200,7 @@ rectangle moves with it.</p>
 </tr>
 <tr>
 <td>L / R</td>
-<td>shoulders</td>
+<td>shoulders (<code>JOY_BUTTON_LEFT_SHOULDER</code> / <code>RIGHT_SHOULDER</code>)</td>
 </tr>
 <tr>
 <td>ZL / ZR (New 3DS)</td>
@@ -191,77 +216,133 @@ rectangle moves with it.</p>
 </tr>
 </tbody>
 </table>
-<p>The accelerometer and gyroscope feed <code>Input.get_accelerometer()</code> and
-<code>Input.get_gyroscope()</code>. The system keyboard opens for text fields
-(<code>DisplayServer.virtual_keyboard_show</code>).</p>
-<h2 id="nintendo3ds-singleton"><code>Nintendo3DS</code> singleton</h2>
+<p>So <code>Input.is_action_pressed("jump")</code> works with actions mapped to joypad
+button 0 (B), and a game written for a gamepad works on the 3DS unchanged.</p>
+<ul>
+<li><strong>Touch:</strong> on the bottom window (see above). Read it with <code>_gui_input</code> or
+  <code>InputEventScreenTouch</code> on that window.</li>
+<li><strong>Motion:</strong> <code>Input.get_accelerometer()</code> and <code>Input.get_gyroscope()</code> give the
+  console's motion sensors.</li>
+<li><strong>Keyboard:</strong> the system keyboard opens for text fields through
+  <code>DisplayServer.virtual_keyboard_show</code>.</li>
+</ul>
+<h2 id="the-nintendo3ds-singleton">The <code>Nintendo3DS</code> singleton</h2>
 <p>Available from scripts on the 3DS. The stock Godot editor doesn't know the
-class, so reach it through <code>Engine</code> to keep scripts parsing there:</p>
+class, so reach it through <code>Engine</code>, which keeps the script parsing there too:</p>
 <pre><code class="language-gdscript">var n3ds = Engine.get_singleton(&quot;Nintendo3DS&quot;) if Engine.has_singleton(&quot;Nintendo3DS&quot;) else null
 </code></pre>
-<p>Methods (an editor built from this fork has the class too, returning neutral
-values):</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Returns / does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_3d_slider()</code></td>
+<td>3D slider position, <code>0.0</code> to <code>1.0</code></td>
+</tr>
+<tr>
+<td><code>is_new_3ds()</code></td>
+<td><code>true</code> on a New 3DS or 2DS XL</td>
+</tr>
+<tr>
+<td><code>get_battery_level()</code></td>
+<td><code>0</code> (empty) to <code>5</code> (full)</td>
+</tr>
+<tr>
+<td><code>is_charging()</code></td>
+<td><code>true</code> while charging</td>
+</tr>
+<tr>
+<td><code>set_stereo_separation(x)</code> / <code>set_stereo_convergence(x)</code></td>
+<td>per-scene stereo overrides; negative restores the settings</td>
+</tr>
+<tr>
+<td><code>set_depth(item, depth, recursive = true)</code></td>
+<td>2D depth, see above</td>
+</tr>
+<tr>
+<td><code>get_depth(item)</code></td>
+<td>the depth set on an item</td>
+</tr>
+<tr>
+<td><code>save_screens(dir)</code></td>
+<td>writes <code>top_left.png</code>, <code>top_right.png</code>, <code>bottom.png</code></td>
+</tr>
+<tr>
+<td><code>get_audio_stats()</code></td>
+<td><code>{active, buffers_played, last_peak}</code> from the audio driver</td>
+</tr>
+</tbody>
+</table>
+<p>Feature flags work with <code>OS.has_feature</code>: <code>"3ds"</code> and <code>"new_3ds"</code>.</p>
+<p>Use <code>is_new_3ds()</code> to scale a game down on the original console: fewer
+particles, shadows off, lower resolution textures.</p>
+<h2 id="renderer">Renderer</h2>
+<p>The PICA200 has programmable vertex shaders but a fixed-function fragment
+stage. The renderer maps Godot's built-in materials onto that fixed stage, so
+most of what a game uses works, and a few features don't exist.</p>
+<h3 id="3d">3D</h3>
 <ul>
-<li><code>get_3d_slider()</code>, <code>is_new_3ds()</code>, <code>get_battery_level()</code> (0-5), <code>is_charging()</code></li>
-<li><code>set_stereo_separation(float)</code>, <code>set_stereo_convergence(float)</code>
-  (negative restores the project settings)</li>
-<li><code>save_screens(dir)</code>: writes <code>top_left.png</code>, <code>top_right.png</code> and
-  <code>bottom.png</code> with what the screens show.</li>
-<li><code>get_audio_stats()</code>: <code>{active, buffers_played, last_peak}</code> of the DSP
-  audio driver.</li>
+<li><strong>Materials.</strong> <code>StandardMaterial3D</code> and <code>ORMMaterial3D</code>: albedo color and
+  texture, UV1 scale and offset, vertex color, unshaded, emission,
+  roughness, metallic and specular (Blinn-Phong highlights), blend modes,
+  cull modes, depth draw and test, alpha scissor, and texture filter and
+  repeat.</li>
+<li><strong>Lights.</strong> Up to 8 per scene: directional, omni and spot, with Godot's
+  distance falloff, plus the environment's ambient light.</li>
+<li><strong>Shadows.</strong> From the first <code>DirectionalLight3D</code> with shadows on (or else the
+  first shadowed <code>SpotLight3D</code>). The shadow map is orthographic around the
+  camera, out to <code>rendering/3ds/shadows/max_distance</code> (default 20), at
+  <code>rendering/3ds/shadows/size</code> (default 512). Depth is 8 bits, so
+  <code>rendering/3ds/shadows/bias</code> (default <code>0.012</code>) trades acne against
+  peter-panning. Only the one light is shadowed.</li>
+<li><strong>Environment.</strong> The background can be a clear color, a color, or a sky.
+  Procedural, panorama and physical skies are approximated, with a sun disc
+  from the directional light in the procedural and physical ones. The
+  ambient light can take the sky's color. <strong>Fog</strong> works in exponential and
+  depth modes.</li>
+<li><strong>Meshes.</strong> <code>MultiMesh</code> (with per-instance color), <code>CPUParticles3D</code>,
+  skeletons and blend shapes. Skinning runs on the CPU, because the PICA200
+  has room for only about 28 bone matrices.</li>
 </ul>
-<p><code>OS.has_feature("3ds")</code> and <code>OS.has_feature("new_3ds")</code> are available too.</p>
-<h2 id="renderer-citro3d">Renderer (citro3d)</h2>
-<p>The PICA200 has vertex shaders but a fixed-function fragment stage, so the
-renderer maps Godot's built-in materials onto it:</p>
+<h3 id="2d">2D</h3>
 <ul>
-<li><code>StandardMaterial3D</code> / <code>ORMMaterial3D</code>: albedo color and texture, UV1
-  scale/offset, vertex color, unshaded, emission, roughness/metallic/specular
-  (Blinn-Phong highlights), blend modes, cull modes, depth draw/test, alpha
-  scissor, texture filter/repeat hints.</li>
-<li>Hardware per-pixel lighting for up to 8 lights: directional, omni and spot
-  (Godot's distance falloff), plus the environment's ambient light.</li>
-<li><code>Environment</code> background: clear color, color, or sky (ProceduralSkyMaterial,
-  PanoramaSkyMaterial, PhysicalSkyMaterial approximated; ambient "Sky"
-  takes its color; directional lights draw a sun disc in procedural and
-  physical skies), and fog (exponential and depth modes) on the PICA fog
-  unit.</li>
-<li>Mipmaps for textures imported with mipmaps (the 3D default).</li>
-<li>Shadows from the first <code>DirectionalLight3D</code> with shadows enabled (else the
-  first shadowed <code>SpotLight3D</code>, with a perspective map of its cone): an
-  orthographic shadow map (<code>rendering/3ds/shadows/size</code>, default 512) around
-  the camera out to <code>rendering/3ds/shadows/max_distance</code> (default 20), read
-  by the PICA200 lighting unit (only that light is darkened, as in Godot).
-  Depth is 8-bit, so <code>rendering/3ds/shadows/bias</code> (default 0.012) trades
-  acne against peter-panning. Casters are the meshes the camera sees.</li>
-<li><code>MultiMesh</code> (per-instance color), <code>CPUParticles3D</code> and <code>CPUParticles2D</code>.</li>
-<li>Skeletons and blend shapes, skinned on the CPU (the PICA200 has uniform
-  room for only ~28 bone matrices).</li>
-<li>2D: rects, nine-patches, polygons, primitives, text, clipping, canvas
-  modulate, <code>CanvasItemMaterial</code> blend modes, filter/repeat settings,
-  <code>MeshInstance2D</code> and 2D MultiMesh.</li>
-<li>2D lights (<code>PointLight2D</code> with a texture, <code>DirectionalLight2D</code>), add and
-  subtract blend modes, item light masks and z ranges, energy up to 4;
-  each lit item gets an extra additive pass per light. No 2D shadows or
-  normal maps.</li>
-<li>Hand-written spatial <code>.gdshader</code> shaders, when <code>fragment()</code> is only
-  assignments the fixed-function stage can do (see below). Custom
-  <code>canvas_item</code> shaders draw with the default 2D pipeline.</li>
+<li>Rects, nine-patches, polygons, primitives, text, clipping, <code>CanvasModulate</code>,
+  <code>CanvasItemMaterial</code> blend modes, filter and repeat settings,
+  <code>MeshInstance2D</code>, and 2D <code>MultiMesh</code>.</li>
+<li><strong>2D lights.</strong> <code>PointLight2D</code> (with a texture) and <code>DirectionalLight2D</code>,
+  with add and subtract blend modes, light masks and z ranges, and energy up
+  to 4. Each lit item draws one extra additive pass per light.</li>
+<li><strong>Not in 2D:</strong> 2D shadows, normal maps, and 2D skeletons.</li>
 </ul>
-<h3 id="custom-spatial-shaders">Custom spatial shaders</h3>
-<p>The PICA200 has no fragment shaders, so a <code>.gdshader</code> is translated when it
-loads. Supported in <code>fragment()</code>:</p>
+<h3 id="not-available">Not available</h3>
+<ul>
+<li><strong>GPU particles</strong> (<code>GPUParticles2D</code> and <code>3D</code>) need compute shaders. Use
+  <code>CPUParticles2D</code> or <code>CPUParticles3D</code> instead.</li>
+<li><strong>Reflection probes</strong>, and most post-processing.</li>
+<li><strong>Clouds</strong> in the procedural sky.</li>
+<li><strong>Omni-light shadows</strong> (they'd need six shadow passes per light).</li>
+<li><strong>Custom <code>canvas_item</code> shaders</strong> draw with the default 2D pipeline. See the
+  next section for spatial shaders.</li>
+</ul>
+<h2 id="custom-spatial-shaders">Custom spatial shaders</h2>
+<p>The PICA200 has no fragment shaders, so a <code>spatial</code> <code>.gdshader</code> is translated
+when it loads. The translation supports a small subset:</p>
 <ul>
 <li><code>ALBEDO</code>, <code>ALPHA</code> and <code>EMISSION</code> set to a product (<code>*</code>) of constants,
-  uniforms (<code>vec3</code>/<code>vec4</code>/<code>float</code>, from the material or the code's
-  defaults), <code>COLOR</code> (vertex color, ALBEDO only) and at most one
-  <code>texture(sampler, uv)</code> lookup, with swizzles like <code>.rgb</code> or <code>.a</code>.</li>
-<li>Texture coordinates: <code>UV</code>, <code>UV * const</code>, <code>UV + const</code> and
-  <code>UV + TIME * const</code> (scrolling).</li>
-<li><code>ROUGHNESS</code>, <code>METALLIC</code>, <code>SPECULAR</code> set to a constant or uniform.</li>
-<li>Render modes as in <code>StandardMaterial3D</code> (unshaded, blend, cull, depth),
-  and the sampler's <code>filter_*</code> / <code>repeat_*</code> hints.</li>
+  uniforms (<code>float</code>, <code>vec3</code>, <code>vec4</code>, from the material or the code's
+  defaults), <code>COLOR</code> (vertex color, for <code>ALBEDO</code>), and at most one
+  <code>texture(sampler, uv)</code> call, with swizzles like <code>.rgb</code> or <code>.a</code>.</li>
+<li>Texture coordinates of the form <code>UV</code>, <code>UV * c</code>, <code>UV + c</code>, or
+  <code>UV + TIME * c</code> (scrolling).</li>
+<li><code>ROUGHNESS</code>, <code>METALLIC</code> and <code>SPECULAR</code>, set to a constant or a uniform.</li>
+<li>Render modes as in <code>StandardMaterial3D</code> (unshaded, blend, cull, depth), and
+  the sampler's <code>filter_*</code> and <code>repeat_*</code> hints.</li>
 </ul>
+<p>Example:</p>
 <pre><code class="language-glsl">shader_type spatial;
 uniform vec4 tint : source_color = vec4(1.0, 0.5, 0.2, 1.0);
 uniform sampler2D tex : source_color, filter_nearest;
@@ -269,42 +350,285 @@ void fragment() {
     ALBEDO = tint.rgb * texture(tex, UV * 2.0 + TIME * vec2(0.1, 0.0)).rgb;
 }
 </code></pre>
-<p>Anything else (other math, function calls, <code>if</code>, local variables, a
-<code>vertex()</code> or <code>light()</code> function) prints a warning naming the shader and the
-reason, and the material draws unshaded with its <code>albedo</code>/<code>color</code> and
-<code>texture_albedo</code>/<code>texture</code> parameters.</p>
-<p>Not implemented yet: GPU particles (need compute shaders: use CPUParticles),
-2D skeletons, omni light shadows, 2D light shadows and normal maps, clouds
-in the procedural sky, reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.</p>
-<h2 id="other-limitations">Other limitations</h2>
+<p>Anything outside the subset (other math, function calls, <code>if</code>, local
+variables, a <code>vertex()</code> or <code>light()</code> function) prints a warning that names the
+shader and the reason. The material then draws unshaded, using its
+<code>albedo</code>/<code>color</code> and <code>texture_albedo</code>/<code>texture</code> parameters, so the object is
+still visible.</p>
+<h2 id="textures">Textures</h2>
 <ul>
-<li>Audio: the DSP driver mixes at 32 kHz stereo with about 96 ms buffered,
-  on its own thread, so slow frames don't underrun it. On real hardware it needs the DSP firmware dump at
-  <code>sdmc:/3ds/dspfirm.cdc</code> (made by the DSP1 homebrew); without it the game
-  runs silently with an error in the log. No microphone input.</li>
-<li>Networking: IPv4 TCP/UDP over Wi-Fi (<code>HTTPRequest</code>, <code>StreamPeerTCP</code>,
-  ENet/WebSocket if those modules are enabled). No IPv6; servers should bind
-  IPv4 addresses. soc:u takes 1 MB of memory.</li>
-<li>Threads: Godot's threads run below the main thread's priority on core 0
-  (the 3DS kernel doesn't time-slice equal priorities), so background work
-  uses the time the main thread waits for vsync. Audio mixes on its own
-  thread (core 2 on the New 3DS).</li>
-<li>No GDExtension (no dynamic loading on the 3DS).</li>
+<li><strong>Formats.</strong> Lossless imports (WebP), Lossy, and VRAM Compressed all load.
+  VRAM Compressed textures are exported as S3TC and decompressed on the 3DS
+  when they load (with <code>bcdec</code>). Lossless and Lossy load faster.</li>
+<li><strong>Size.</strong> Textures larger than 1024 x 1024 are downscaled on load. Keep
+  them at 512 or below where you can; the 3DS has little VRAM.</li>
+<li><strong>Mipmaps.</strong> Textures imported with mipmaps (the 3D default) get a full
+  chain, built on the CPU.</li>
+<li><strong>16-bit storage</strong> on the original console. See
+  <a href="#memory-and-the-original-3ds">Memory</a>.</li>
+</ul>
+<h2 id="audio">Audio</h2>
+<p>The audio driver (ndsp) plays at 32 kHz stereo, with about 96 ms buffered in
+six 512-frame blocks, mixed on its own thread so a slow frame doesn't
+underrun it. Everything Godot plays through the audio server goes through
+this driver.</p>
+<ul>
+<li><strong>Firmware.</strong> On real hardware the DSP needs its firmware dump at
+  <code>sdmc:/3ds/dspfirm.cdc</code>, made with the DSP1 homebrew. Without it the game
+  runs silently and writes an error to the log. The Azahar emulator accepts a
+  placeholder file for testing.</li>
+<li><strong>Checking audio.</strong> <code>get_audio_stats()</code> returns whether the driver is active,
+  how many buffers it has played, and the loudest sample of the last buffer.</li>
+<li><strong>Microphone:</strong> not supported.</li>
+</ul>
+<h2 id="files-saves-and-paths">Files, saves and paths</h2>
+<table>
+<thead>
+<tr>
+<th>Godot path</th>
+<th>On the console</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>res://</code></td>
+<td>inside the <code>.3dsx</code>'s RomFS (read-only)</td>
+</tr>
+<tr>
+<td><code>user://</code></td>
+<td><code>sdmc:/3ds/godot/app_userdata/&lt;project name&gt;/</code></td>
+</tr>
+<tr>
+<td><code>sdmc:/...</code></td>
+<td>the SD card, direct (for example <code>sdmc:/3ds/godot/launcher/</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>user://</code> for saves and settings. The project name comes from the project
+settings. Saves persist across runs and across updates of the same game, as
+long as the name doesn't change.</p>
+<p>Godot's output (<code>print</code>, errors) goes to <code>sdmc:/3ds/godot/stdout.txt</code>, which is
+the first place to look when something goes wrong.</p>
+<p>Command-line arguments come from two places: the Homebrew Launcher, and
+<code>sdmc:/3ds/godot/args.txt</code> (one argument per line). Debug templates use this
+for remote debugging. The game can read its own arguments with
+<code>OS.get_cmdline_user_args()</code>.</p>
+<h2 id="networking">Networking</h2>
+<ul>
+<li><strong>Sockets:</strong> IPv4 TCP and UDP over Wi-Fi, through <code>HTTPRequest</code>,
+  <code>StreamPeerTCP</code>, and <code>PacketPeerUDP</code>. The <code>soc:u</code> service takes 1 MB of
+  memory.</li>
+<li><strong>IPv4 only.</strong> Don't rely on IPv6, and have servers bind IPv4 addresses.</li>
+<li><strong>No TLS in the template.</strong> Plain HTTP and TCP only, so anything sensitive
+  travels unencrypted. Don't send passwords or secrets from a 3DS game.</li>
+<li><strong>Optional modules.</strong> ENet and WebSocket work only if their modules are
+  enabled in the template (they aren't by default; the template is kept
+  small).</li>
+<li><strong>HTTP requests have one total timeout.</strong> <code>HTTPRequest.timeout</code> covers the
+  whole request, so a large download over a slow link can time out. Fetch big
+  files in ranges (<code>Range:</code> headers) and resume, as the launcher does.</li>
+</ul>
+<h2 id="threads">Threads</h2>
+<p>Godot's worker threads run on the 3DS, at a priority just below the main
+thread's. The 3DS kernel doesn't time-slice equal priorities, so a worker
+gets time when the main thread waits for vsync. Heavy background work
+(loading, procedural generation) should run on a worker and report back to the
+main thread. Long jobs on the main thread will drop frames.</p>
+<ul>
+<li>Each worker thread gets a 512 KiB stack (the libctru default is far too small
+  for Godot's code). The main thread has 1 MiB.</li>
+<li>Audio mixes on its own thread, on the second core of the New 3DS.</li>
+</ul>
+<h2 id="memory-and-the-original-3ds">Memory and the original 3DS</h2>
+<p>The original 3DS gives a game about <strong>64 MB</strong>, and the New 3DS gives <strong>124 MB</strong>.
+The code and read-only data of the template take about 20 MB, so the original
+has about 44 MB free for a game. Its CPU runs at 268 MHz, a third of the New
+3DS's 804 MHz. The GPU is the same on both.</p>
+<p>What helps on the original:</p>
+<ul>
+<li><strong>A smaller template.</strong> <code>platform/3ds/tools/make_profile.py</code> scans a project
+  (scenes, scripts, imported models) and writes a build profile that leaves
+  out the node classes the project never uses. The platformer's template went
+  from 20.5 to 17.8 MB this way.</li>
+</ul>
+<pre><code class="language-sh">python3 platform/3ds/tools/make_profile.py ~/game --godot bin/godot.linuxbsd.editor.x86_64 -o bin/profiles/game.json
+platform/3ds/build.sh target=template_release build_profile=bin/profiles/game.json
+</code></pre>
+<p>The profile must sit inside the Godot folder, because the build runs in
+  Docker. A class the scan can't see (one built from a string, say) goes in
+  <code>--keep</code>. The game prints <code>Cannot get class</code> if one is missing. Several
+  games can share a template with <code>--also-project</code>.
+- <strong>16-bit textures.</strong> <code>rendering/3ds/textures/format</code> is <code>Auto</code> by default:
+  textures are stored as RGB565, RGBA5551 or RGBA4444 on the original console,
+  and as full RGBA8 on the New 3DS. <code>16-bit</code> and <code>Full</code> force one. This halves
+  texture memory, with dithering. <code>Image</code> readback returns RGBA8 either way.
+- <strong>Rehearsing the budget.</strong> Build with <code>app_memory_limit_mb=40</code> to cap the
+  heap and linear heap at 40 MB, even on a New 3DS or in an emulator. The
+  platformer runs normally at 40 MB and at 28 MB, and fails at 22 MB. Emulator
+  CPU timing isn't accurate, so test speed on hardware.
+- <strong>Scale down</strong> with <code>Nintendo3DS.is_new_3ds()</code>.</p>
+<p>The CIA template (<code>platform/3ds/cia/template.rsf</code>) asks for 64 MB, which the
+original console grants, and 124 MB at 804 MHz on the New 3DS.</p>
+<h2 id="building-the-template">Building the template</h2>
+<p>Builds run in Docker (devkitARM and SCons). The first run builds the image.</p>
+<pre><code class="language-sh">platform/3ds/build.sh target=template_release   # or template_debug
+</code></pre>
+<p>Output: <code>bin/godot.3ds.&lt;target&gt;.arm32.elf</code> and <code>.3dsx</code>. The defaults are full
+LTO and <code>-Oz</code> (the release template is about 20.5 MB). Add <code>lto=none</code> while you
+iterate; the build is much faster.</p>
+<p>Options (pass them to <code>build.sh</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>lto=none</code></td>
+<td>skip link-time optimization (faster builds, bigger binary)</td>
+</tr>
+<tr>
+<td><code>linear_heap_mb=N</code></td>
+<td>fix the GPU-visible heap at N MiB (default: 30% of free memory, 8 to 32 MiB)</td>
+</tr>
+<tr>
+<td><code>app_memory_limit_mb=N</code></td>
+<td>cap heap plus linear heap at N MiB, to rehearse the original console</td>
+</tr>
+<tr>
+<td><code>build_profile=PATH</code></td>
+<td>leave out unused node classes (see <a href="#memory-and-the-original-3ds">Memory</a>)</td>
+</tr>
+</tbody>
+</table>
+<p>To build an editor with the 3DS platform, from this repository:</p>
+<pre><code class="language-sh">python3 -m venv .venv &amp;&amp; .venv/bin/pip install scons
+.venv/bin/scons platform=linuxbsd target=editor -j$(nproc)
+</code></pre>
+<p>Then install the templates so the editor can export with them:</p>
+<pre><code class="language-sh">platform/3ds/install_templates.sh
+</code></pre>
+<p><code>install_templates.sh</code> copies <code>bin/godot.3ds.template_*</code> to
+<code>~/.local/share/godot/export_templates/&lt;version&gt;/3ds_{debug,release}.{3dsx,elf}</code>
+(the <code>.elf</code> is used for CIAs). Pass a folder to install somewhere else, for
+example <code>bin/editor_data/export_templates</code> for a self-contained editor.</p>
+<h2 id="exporting-from-the-editor">Exporting from the editor</h2>
+<p>Project &gt; Export &gt; Add &gt; <strong>Nintendo 3DS</strong>, then export to a file ending in
+<code>.3dsx</code> or <code>.cia</code>.</p>
+<ul>
+<li><strong><code>.3dsx</code></strong> is written directly: the template, a title and icon (an SMDH
+  block), and a RomFS holding the project's <code>.pck</code>. No other tools are needed.</li>
+<li><strong><code>.cia</code></strong> also needs <strong>makerom</strong> and <strong>bannertool</strong>. Set their paths in
+  Editor Settings &gt; Export &gt; 3DS. The CIA preset also takes a banner image and
+  sound, a unique id and a product code (the defaults are the icon on a dark
+  plate, silence, and an id derived from the title).</li>
+</ul>
+<p>Preset options:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>application/title</code></td>
+<td>the name shown in the launcher and on HOME</td>
+</tr>
+<tr>
+<td><code>application/description</code></td>
+<td>a short description (SMDH)</td>
+</tr>
+<tr>
+<td><code>application/author</code></td>
+<td>the publisher line (SMDH)</td>
+</tr>
+<tr>
+<td><code>application/icon</code></td>
+<td>the icon, 48 x 48 (defaults to the project icon)</td>
+</tr>
+<tr>
+<td><code>cia/banner</code></td>
+<td>the HOME-menu banner, 256 x 128 (CIA only)</td>
+</tr>
+<tr>
+<td><code>cia/banner_audio</code></td>
+<td>the banner's sound (CIA only)</td>
+</tr>
+</tbody>
+</table>
+<p>Editor Settings under <code>export/3ds</code> also hold the console address, for <strong>Run on
+3DS</strong> (see below).</p>
+<p>Exporting headless works too:</p>
+<pre><code class="language-sh">godot --headless --path &lt;project&gt; --export-release &quot;3DS&quot; game.3dsx
+</code></pre>
+<h3 id="from-the-command-line-without-the-editor">From the command line, without the editor</h3>
+<ol>
+<li>Export the project as a pack: <code>godot --headless --path &lt;project&gt; --export-pack &lt;preset&gt; game.pck</code>.</li>
+<li>Bundle it with the template: <code>platform/3ds/make_game.sh --title "My Game" game.pck game.3dsx</code>,
+   or <code>... game.pck game.cia</code> (add <code>--banner</code>, <code>--author</code>, <code>--id</code>). With no
+   arguments it prints all its options.</li>
+</ol>
+<h2 id="running-logs-and-debugging">Running, logs and debugging</h2>
+<ul>
+<li><strong>Run it.</strong> Put the <code>.3dsx</code> on the SD card under <code>sdmc:/3ds/</code> and start it
+  from the Homebrew Launcher, or install the <code>.cia</code> with FBI.</li>
+<li><strong>Logs.</strong> <code>sdmc:/3ds/godot/stdout.txt</code>. Read it with the SD card in a
+  computer, or over FTP.</li>
+<li><strong>Remote debugging.</strong> Debug templates honor <code>--remote-debug tcp://&lt;pc&gt;:6007</code>
+  and other Godot arguments, from the launcher or from <code>args.txt</code>.</li>
+<li><strong>Run on 3DS from the editor.</strong> Set Editor Settings &gt; Export &gt; 3DS &gt;
+  <strong>3dslink</strong> (the devkitPro tool) and optionally the <strong>Console Address</strong>. A
+  "Run on 3DS" button appears for the 3DS preset. Press Y in the Homebrew
+  Launcher, click the button, and the game starts with the editor's debugger,
+  output and remote scene tree connected.</li>
+<li><strong>Crash addresses.</strong> A Luma crash screen shows the program counter (PC) and
+  link register (LR). Resolve them against the release ELF with
+  <code>arm-none-eabi-addr2line -e godot.3ds.template_release.arm32.elf &lt;address&gt;</code>.
+  Use the debug template for useful symbols.</li>
+<li><strong>Screens.</strong> <code>Nintendo3DS.save_screens(dir)</code> to check a layout without a
+  console camera.</li>
+</ul>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li><strong>Hardware:</strong> no microphone input. No IPv6. No TLS. No GDExtension (no
+  dynamic loading).</li>
+<li><strong>Graphics:</strong> no GPU particles, no reflection probes, no post-processing, no
+  2D shadows or normal maps, no omni-light shadows. See the
+  <a href="#renderer">renderer</a> section.</li>
+<li><strong>Shaders:</strong> only the subset in <a href="#custom-spatial-shaders">Custom spatial shaders</a>.</li>
+<li><strong>Textures:</strong> 1024 x 1024 maximum.</li>
+<li><strong>Audio:</strong> needs <code>dspfirm.cdc</code> on real hardware (see <a href="#audio">Audio</a>).</li>
+<li><strong>Networking:</strong> IPv4 only; plain text on the wire.</li>
+<li><strong>Testing:</strong> the Azahar emulator is a good check, but it doesn't model the
+  original console's speed, and it hides some crashes that real hardware
+  reports. Test on a console before release.</li>
 </ul>
 <h2 id="class-reference">Class reference</h2>
-<p>The editor's Help has entries for the classes this platform adds: <code>Nintendo3DS</code>
-and <code>EditorExportPlatform3DS</code>. Their sources are in <code>doc_classes/</code>.</p>
+<p>The editor's Help has entries for the classes this platform adds:
+<code>Nintendo3DS</code> and <code>EditorExportPlatform3DS</code>. The pages are built from the XML
+in <code>doc_classes/</code>, and the same pages are in the documentation website in
+<code>docs-site/</code> (see its README).</p>
 <h2 id="porting-notes">Porting notes</h2>
+<p>For people working on the template itself.</p>
 <ul>
-<li>arm-none-eabi defines <code>int32_t</code> as <code>long</code>; <code>detect.py</code> redefines the 32-bit
-  fixed-width types as <code>int</code> so Godot's <code>Variant</code> overloads stay distinct.</li>
-<li>Godot adds <code>-s</code> at link time, which breaks <code>3dsx.specs</code> (<code>--emit-relocs</code>);
-  the SCsub removes it.</li>
-<li>The PICA200 samples texture row v = 0 at the end of the texture data, and
-  draws render targets the same way when the projection is y-flipped, so all
-  textures store Godot's top row last (see <code>rendering/citro3d_common.h</code>).</li>
-<li>citro3d queues clears to the GPU immediately but draws only at frame end, so
-  a clear mid-frame first splits the frame (<code>C3D_FrameSplit</code>).</li>
-<li>citro3d can't create or delete render targets inside a frame; resizes and
+<li><code>int32_t</code> is <code>long</code> on arm-none-eabi. <code>detect.py</code> redefines the 32-bit
+  fixed-width types as <code>int</code>, so Godot's <code>Variant</code> overloads stay distinct.</li>
+<li>Godot adds <code>-s</code> at link time, which breaks <code>3dsx.specs</code> (it needs
+  <code>--emit-relocs</code>). The SCsub removes it.</li>
+<li>The PICA200 samples texture row <code>v = 0</code> at the end of the texture data, and
+  render targets are drawn the same way when the projection is y-flipped. So
+  every texture stores Godot's top row last (see <code>rendering/citro3d_common.h</code>).</li>
+<li>citro3d queues clears to the GPU at once, but draws only at frame end. A
+  clear in the middle of a frame has to split the frame first
+  (<code>C3D_FrameSplit</code>).</li>
+<li>citro3d can't create or delete render targets inside a frame. Resizes and
   frees are deferred to the next frame.</li>
+<li>Never pass a null texture to <code>C3D_TexBind</code>. citro3d dereferences it, and the
+  console data-aborts, while Azahar tolerates it.</li>
+<li>The Stereo Depth inspector row and the <code>Nintendo3DS</code> class are compiled into
+  the editor too, through <code>platform/3ds/export/</code> and <code>platform/3ds/api/</code>.</li>
 </ul></main></div></body></html>
