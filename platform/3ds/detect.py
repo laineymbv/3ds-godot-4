@@ -25,6 +25,8 @@ ENABLED_MODULES = [
     "vorbis",
     "mp3",
     "bcdec",
+    # Lossless texture imports (the default for 2D) are stored as WebP.
+    "webp",
 ]
 
 

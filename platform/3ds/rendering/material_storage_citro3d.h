@@ -40,6 +40,34 @@ namespace Citro3D {
 // What a shader's code means for the fixed-function PICA200. Only the
 // shaders Godot generates for BaseMaterial3D / CanvasItemMaterial map fully;
 // hand-written shaders draw unshaded with their color/texture parameters.
+// A custom spatial shader reduced to what the fixed-function pipeline can
+// do: each output is a product of constants, uniforms, one texture and the
+// vertex color. See MaterialStorage::_translate_custom().
+struct ShaderProduct {
+	Color constant = Color(1, 1, 1, 1);
+	Vector<StringName> uniforms;
+	StringName texture;
+	bool vertex_color = false;
+};
+
+struct ShaderRecipe {
+	bool ok = false;
+	String failure;
+	ShaderProduct albedo;
+	bool has_alpha = false;
+	ShaderProduct alpha;
+	bool has_emission = false;
+	ShaderProduct emission;
+	StringName roughness, metallic, specular; // Float uniforms, if assigned.
+	float roughness_const = -1, metallic_const = -1, specular_const = -1;
+	Vector2 uv_scale = Vector2(1, 1);
+	Vector2 uv_offset;
+	Vector2 uv_scroll; // Per second (UV + TIME * k).
+	bool texture_nearest = false;
+	bool texture_repeat = true; // Godot's default for spatial samplers.
+	HashMap<StringName, Variant> defaults; // Uniform defaults from the code.
+};
+
 struct Shader {
 	enum Kind {
 		KIND_SPATIAL,
@@ -70,7 +98,9 @@ struct Shader {
 		bool texture_repeat = false;
 	};
 	String code;
+	String path;
 	Info info;
+	ShaderRecipe recipe; // Custom spatial shaders only.
 	Dependency dependency;
 };
 
@@ -95,6 +125,7 @@ struct MaterialState {
 	float specular = 0.5;
 	float alpha_scissor = 0.5;
 	bool transparent = false;
+	Vector2 uv_scroll;
 };
 
 class MaterialStorage : public RendererDummy::MaterialStorage {
@@ -104,6 +135,7 @@ class MaterialStorage : public RendererDummy::MaterialStorage {
 	HashSet<RID> embedded_set;
 
 	void _parse_shader(Shader *p_shader);
+	void _translate_custom(Shader *p_shader);
 
 public:
 	static MaterialStorage *get_singleton() { return singleton; }
@@ -120,6 +152,7 @@ public:
 	void shader_initialize(RID p_rid, bool p_embedded) override;
 	void shader_free(RID p_rid) override;
 	void shader_set_code(RID p_shader, const String &p_code) override;
+	void shader_set_path_hint(RID p_shader, const String &p_path) override;
 	String shader_get_code(RID p_shader) const override;
 	void get_shader_parameter_list(RID p_shader, List<PropertyInfo> *p_param_list) const override {}
 	const HashSet<RID> &shader_embedded_set_get() const override { return embedded_set; }

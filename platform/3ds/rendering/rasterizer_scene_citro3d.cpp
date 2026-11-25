@@ -651,7 +651,7 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 	// Texture and UV transform.
 	Texture *tex = ts->resolve_texture(m.albedo_texture);
 	Vector2 uv_scale = m.uv_scale;
-	Vector2 uv_offset = m.uv_offset;
+	Vector2 uv_offset = m.uv_offset + m.uv_scroll * (float)Math::fmod(time, 1000.0);
 	if (tex) {
 		Vector2 ts_scale = tex->uv_scale();
 		uv_scale *= ts_scale;

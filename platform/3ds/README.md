@@ -13,9 +13,8 @@ Builds run in Docker (devkitARM + SCons):
 platform/3ds/build.sh target=template_release   # or template_debug
 ```
 
-Output: `bin/godot.3ds.<target>.arm32.nothreads.elf` and `.3dsx`. Builds use
-full LTO and `-Oz` by default (release template about 20 MB; it was 24.5 MB
-without them). Add `lto=none` for faster iteration.
+Output: `bin/godot.3ds.<target>.arm32.elf` and `.3dsx`. Builds use
+full LTO and `-Oz` by default (release template about 20.5 MB). Add `lto=none` for faster iteration.
 
 Options (pass to `build.sh`):
 
@@ -49,6 +48,7 @@ Then in the editor: Project > Export > Add > Nintendo 3DS, and export to a
   title).
 - Preset options: title, description, author, icon (defaults to the project
   icon), custom templates.
+- Lossless (WebP), Lossy and VRAM Compressed texture imports all load.
 - Textures imported as VRAM Compressed export as S3TC and are decompressed on
   the 3DS at load (`bcdec`); Lossless/Lossy import is faster to load.
 
@@ -192,20 +192,47 @@ renderer maps Godot's built-in materials onto it:
   subtract blend modes, item light masks and z ranges, energy up to 4;
   each lit item gets an extra additive pass per light. No 2D shadows or
   normal maps.
-- Hand-written `.gdshader` shaders are not supported (no fragment shaders):
-  spatial ones draw unshaded with their `albedo`/`color` and
-  `texture_albedo`/`texture` parameters, canvas ones with the default 2D
-  pipeline. A warning is printed once.
+- Hand-written spatial `.gdshader` shaders, when `fragment()` is only
+  assignments the fixed-function stage can do (see below). Custom
+  `canvas_item` shaders draw with the default 2D pipeline.
+
+### Custom spatial shaders
+
+The PICA200 has no fragment shaders, so a `.gdshader` is translated when it
+loads. Supported in `fragment()`:
+
+- `ALBEDO`, `ALPHA` and `EMISSION` set to a product (`*`) of constants,
+  uniforms (`vec3`/`vec4`/`float`, from the material or the code's
+  defaults), `COLOR` (vertex color, ALBEDO only) and at most one
+  `texture(sampler, uv)` lookup, with swizzles like `.rgb` or `.a`.
+- Texture coordinates: `UV`, `UV * const`, `UV + const` and
+  `UV + TIME * const` (scrolling).
+- `ROUGHNESS`, `METALLIC`, `SPECULAR` set to a constant or uniform.
+- Render modes as in `StandardMaterial3D` (unshaded, blend, cull, depth),
+  and the sampler's `filter_*` / `repeat_*` hints.
+
+```glsl
+shader_type spatial;
+uniform vec4 tint : source_color = vec4(1.0, 0.5, 0.2, 1.0);
+uniform sampler2D tex : source_color, filter_nearest;
+void fragment() {
+	ALBEDO = tint.rgb * texture(tex, UV * 2.0 + TIME * vec2(0.1, 0.0)).rgb;
+}
+```
+
+Anything else (other math, function calls, `if`, local variables, a
+`vertex()` or `light()` function) prints a warning naming the shader and the
+reason, and the material draws unshaded with its `albedo`/`color` and
+`texture_albedo`/`texture` parameters.
 
 Not implemented yet: GPU particles (need compute shaders: use CPUParticles),
-2D skeletons, omni light shadows, 2D light shadows and normal maps, sun disk/clouds in the procedural sky,
-reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.
+2D skeletons, omni light shadows, 2D light shadows and normal maps, clouds
+in the procedural sky, reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.
 
 ## Other limitations
 
 - Audio: the DSP driver mixes at 32 kHz stereo with about 96 ms buffered,
-  refilled once per frame (no threads), so frames slower than ~90 ms
-  underrun. On real hardware it needs the DSP firmware dump at
+  on its own thread, so slow frames don't underrun it. On real hardware it needs the DSP firmware dump at
   `sdmc:/3ds/dspfirm.cdc` (made by the DSP1 homebrew); without it the game
   runs silently with an error in the log. No microphone input.
 - Networking: IPv4 TCP/UDP over Wi-Fi (`HTTPRequest`, `StreamPeerTCP`,
