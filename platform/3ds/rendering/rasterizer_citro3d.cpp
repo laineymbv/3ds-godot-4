@@ -240,9 +240,10 @@ void RasterizerCitro3D::bind_canvas_program() {
 	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 2); // position
 	AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 2); // uv
 	AttrInfo_AddLoader(ai, 2, GPU_UNSIGNED_BYTE, 4); // color
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2); // light uv
 	C3D_BufInfo *bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
-	BufInfo_Add(bi, stream_vertices, sizeof(CanvasVertex), 3, 0x210);
+	BufInfo_Add(bi, stream_vertices, sizeof(CanvasVertex), 4, 0x3210);
 	// The scene binds per-mesh buffers, so this has to be redone after it.
 	C3D_LightEnvBind(nullptr);
 	bound_program = 1;
@@ -395,6 +396,7 @@ void RasterizerCitro3D::_draw_screen_quad(C3D_RenderTarget *p_target, int p_scre
 		v[i].u = corners[i][2];
 		v[i].v = corners[i][3];
 		v[i].color[0] = v[i].color[1] = v[i].color[2] = v[i].color[3] = 255;
+		v[i].lu = v[i].lv = 0;
 	}
 	GSPGPU_FlushDataCache(v, sizeof(CanvasVertex) * 4);
 

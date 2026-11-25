@@ -64,6 +64,11 @@ class RasterizerCanvasCitro3D : public RasterizerCanvasDummy {
 		uint32_t first = 0;
 		uint32_t count = 0;
 		Citro3D::Texture *texture = nullptr;
+		// Additive 2D light pass over the same geometry.
+		bool light_pass = false;
+		bool light_subtract = false;
+		Citro3D::Texture *light_texture = nullptr;
+		int light_scale = 1; // TEV output scale: 1, 2 or 4.
 		bool nearest = false;
 		bool repeat = false;
 		BlendMode blend = BLEND_MIX;
@@ -74,6 +79,29 @@ class RasterizerCanvasCitro3D : public RasterizerCanvasDummy {
 	Batch current;
 	bool batch_open = false;
 
+	// The command being built: its state and triangles (emitted once plain,
+	// then once per 2D light that affects the item).
+	struct PendingVertex {
+		Vector2 pos;
+		Vector2 uv;
+		Color color;
+	};
+	LocalVector<PendingVertex> pending;
+	Batch command_state;
+
+	struct LightInfo {
+		Light *light;
+		Citro3D::Texture *texture;
+		Transform2D to_uv;
+		Color color; // color * energy / scale
+		int scale;
+	};
+	LocalVector<LightInfo> lights;
+	LocalVector<const LightInfo *> item_lights;
+	Color canvas_modulate = Color(1, 1, 1, 1); // Base pass only, as in Godot.
+
+	void _open_batch(const Batch &p_state);
+	void _emit_pending();
 	void _flush();
 	void _set_state(Citro3D::Texture *p_tex, bool p_nearest, bool p_repeat, BlendMode p_blend, bool p_clip, const Rect2i &p_clip_rect);
 	void _add_triangle(const Vector2 *p_pos, const Vector2 *p_uv, const Color *p_col);

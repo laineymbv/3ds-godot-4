@@ -188,13 +188,17 @@ renderer maps Godot's built-in materials onto it:
 - 2D: rects, nine-patches, polygons, primitives, text, clipping, canvas
   modulate, `CanvasItemMaterial` blend modes, filter/repeat settings,
   `MeshInstance2D` and 2D MultiMesh.
+- 2D lights (`PointLight2D` with a texture, `DirectionalLight2D`), add and
+  subtract blend modes, item light masks and z ranges, energy up to 4;
+  each lit item gets an extra additive pass per light. No 2D shadows or
+  normal maps.
 - Hand-written `.gdshader` shaders are not supported (no fragment shaders):
   spatial ones draw unshaded with their `albedo`/`color` and
   `texture_albedo`/`texture` parameters, canvas ones with the default 2D
   pipeline. A warning is printed once.
 
 Not implemented yet: GPU particles (need compute shaders: use CPUParticles),
-2D skeletons, omni/spot light shadows, 2D lights, sun disk/clouds in the procedural sky,
+2D skeletons, omni light shadows, 2D light shadows and normal maps, sun disk/clouds in the procedural sky,
 reflection probes and other post-processing. Textures larger than 1024x1024 are downscaled.
 
 ## Other limitations

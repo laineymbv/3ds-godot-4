@@ -8,11 +8,13 @@
 
 .out outpos position
 .out outtc0 texcoord0
+.out outtc1 texcoord1   ; 2D light texture
 .out outclr color
 
 .alias inpos v0
 .alias intex v1
 .alias inclr v2
+.alias inlight v3
 
 .proc main
 	mov r0.xy, inpos.xy
@@ -25,6 +27,7 @@
 	dp4 outpos.w, projection[3], r0
 
 	mov outtc0, intex
+	mov outtc1, inlight
 	mul outclr, myconst.zzzz, inclr
 
 	end

@@ -56,6 +56,7 @@ struct CanvasVertex {
 	float x, y;
 	float u, v;
 	uint8_t color[4];
+	float lu, lv; // 2D light texture coordinates.
 };
 } // namespace Citro3D
 

@@ -54,6 +54,7 @@ void RasterizerCanvasCitro3D::free_polygon(PolygonID p_polygon) {
 }
 
 void RasterizerCanvasCitro3D::_flush() {
+	// (Batches only; pending command triangles go through _emit_pending.)
 	if (batch_open && current.count > 0) {
 		batches.push_back(current);
 	}
@@ -62,17 +63,23 @@ void RasterizerCanvasCitro3D::_flush() {
 }
 
 void RasterizerCanvasCitro3D::_set_state(Texture *p_tex, bool p_nearest, bool p_repeat, BlendMode p_blend, bool p_clip, const Rect2i &p_clip_rect) {
-	if (batch_open && current.texture == p_tex && current.nearest == p_nearest && current.repeat == p_repeat && current.blend == p_blend && current.clip == p_clip && (!p_clip || current.clip_rect == p_clip_rect)) {
+	_emit_pending(); // Finish the previous command.
+	command_state = Batch();
+	command_state.texture = p_tex;
+	command_state.nearest = p_nearest;
+	command_state.repeat = p_repeat;
+	command_state.blend = p_blend;
+	command_state.clip = p_clip;
+	command_state.clip_rect = p_clip_rect;
+}
+
+void RasterizerCanvasCitro3D::_open_batch(const Batch &p_state) {
+	if (batch_open && current.texture == p_state.texture && current.nearest == p_state.nearest && current.repeat == p_state.repeat && current.blend == p_state.blend && current.clip == p_state.clip && (!p_state.clip || current.clip_rect == p_state.clip_rect) && current.light_pass == p_state.light_pass && current.light_subtract == p_state.light_subtract && current.light_texture == p_state.light_texture && current.light_scale == p_state.light_scale) {
 		return;
 	}
 	_flush();
-	current = Batch();
-	current.texture = p_tex;
-	current.nearest = p_nearest;
-	current.repeat = p_repeat;
-	current.blend = p_blend;
-	current.clip = p_clip;
-	current.clip_rect = p_clip_rect;
+	current = p_state;
+	current.count = 0;
 	batch_open = true;
 }
 
@@ -88,26 +95,57 @@ static inline void _put(CanvasVertex &r_v, const Vector2 &p_pos, const Vector2 &
 }
 
 void RasterizerCanvasCitro3D::_add_triangle(const Vector2 *p_pos, const Vector2 *p_uv, const Color *p_col) {
-	uint32_t first;
-	CanvasVertex *v = RasterizerCitro3D::get_singleton()->stream_alloc(3, first);
-	if (!v) {
+	for (int i = 0; i < 3; i++) {
+		pending.push_back({ p_pos[i], p_uv[i], p_col[i] });
+	}
+}
+
+void RasterizerCanvasCitro3D::_emit_pending() {
+	if (pending.is_empty()) {
 		return;
 	}
-	if (current.count == 0) {
-		current.first = first;
-	} else if (current.first + current.count != first) {
-		// Something else used the stream in between; start a new batch.
-		Batch b = current;
-		_flush();
-		current = b;
-		current.first = first;
-		current.count = 0;
-		batch_open = true;
+	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	// Pass 0 is the item itself; then one additive pass per light.
+	for (int pass = -1; pass < (int)item_lights.size(); pass++) {
+		Batch state = command_state;
+		const LightInfo *li = pass >= 0 ? item_lights[pass] : nullptr;
+		if (li) {
+			state.light_pass = true;
+			state.light_subtract = li->light->blend_mode == RSE::CANVAS_LIGHT_BLEND_MODE_SUB;
+			state.light_texture = li->texture;
+			state.light_scale = li->scale;
+		}
+		_open_batch(state);
+		uint32_t first;
+		CanvasVertex *v = r->stream_alloc(pending.size(), first);
+		if (!v) {
+			break;
+		}
+		if (current.count == 0) {
+			current.first = first;
+		} else if (current.first + current.count != first) {
+			Batch b = current;
+			_flush();
+			current = b;
+			current.first = first;
+			current.count = 0;
+			batch_open = true;
+		}
+		for (uint32_t i = 0; i < pending.size(); i++) {
+			const PendingVertex &pv = pending[i];
+			Color c = li ? pv.color * li->color : pv.color * canvas_modulate;
+			_put(v[i], pv.pos, pv.uv, c);
+			if (li && li->texture) {
+				Vector2 luv = li->to_uv.xform(pv.pos) * li->texture->uv_scale();
+				v[i].lu = luv.x;
+				v[i].lv = luv.y;
+			} else {
+				v[i].lu = v[i].lv = 0;
+			}
+		}
+		current.count += pending.size();
 	}
-	for (int i = 0; i < 3; i++) {
-		_put(v[i], p_pos[i], p_uv[i], p_col[i]);
-	}
-	current.count += 3;
+	pending.clear();
 }
 
 void RasterizerCanvasCitro3D::_add_quad(const Vector2 p_pos[4], const Vector2 p_uv[4], const Color &p_col) {
@@ -131,7 +169,7 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
 	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 	C3D_CullFace(GPU_CULL_NONE);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
-	for (int i = 1; i < 6; i++) {
+	for (int i = 2; i < 6; i++) {
 		C3D_TexEnvInit(C3D_GetTexEnv(i));
 	}
 
@@ -152,41 +190,66 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
 				bound_tex = b.texture;
 			}
 		}
-		int tev = b.texture ? 1 : 0;
+		if (b.light_texture) {
+			C3D_Tex *lt = &b.light_texture->tex;
+			C3D_TexSetFilter(lt, GPU_LINEAR, GPU_LINEAR);
+			C3D_TexSetWrap(lt, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+			C3D_TexBind(1, lt);
+		}
+		int tev = (b.texture ? 1 : 0) | (b.light_pass ? 2 : 0) | (b.light_texture ? 4 : 0) | (b.light_scale << 3);
 		if (tev != bound_tev) {
 			C3D_TexEnv *env = C3D_GetTexEnv(0);
 			C3D_TexEnvInit(env);
-			if (tev) {
+			if (b.texture) {
 				C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 				C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
 			} else {
 				C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 				C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
 			}
+			// Light pass: x the light texture, scaled back up for energy > 1.
+			C3D_TexEnv *env1 = C3D_GetTexEnv(1);
+			C3D_TexEnvInit(env1);
+			if (b.light_pass && b.light_texture) {
+				C3D_TexEnvSrc(env1, C3D_Both, GPU_PREVIOUS, GPU_TEXTURE1, GPU_PREVIOUS);
+				C3D_TexEnvFunc(env1, C3D_Both, GPU_MODULATE);
+			} else {
+				C3D_TexEnvSrc(env1, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+				C3D_TexEnvFunc(env1, C3D_Both, GPU_REPLACE);
+			}
+			if (b.light_pass && b.light_scale > 1) {
+				C3D_TexEnvScale(env1, C3D_RGB, b.light_scale == 4 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_2);
+			}
 			bound_tev = tev;
 		}
-		if ((int)b.blend != bound_blend) {
-			switch (b.blend) {
-				case BLEND_ADD:
-					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_SRC_ALPHA, GPU_ONE);
-					break;
-				case BLEND_SUB:
-					C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT, GPU_SRC_ALPHA, GPU_ONE, GPU_SRC_ALPHA, GPU_ONE);
-					break;
-				case BLEND_MUL:
-					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_COLOR, GPU_ZERO, GPU_DST_ALPHA, GPU_ZERO);
-					break;
-				case BLEND_PREMUL:
-					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-					break;
-				case BLEND_DISABLED:
-					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-					break;
-				default:
-					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-					break;
+		int blend_key = b.light_pass ? (b.light_subtract ? 101 : 100) : (int)b.blend;
+		if (blend_key != bound_blend) {
+			if (b.light_pass) {
+				// Lights add (or subtract) color, weighted by coverage; dst alpha stays.
+				C3D_AlphaBlend(b.light_subtract ? GPU_BLEND_REVERSE_SUBTRACT : GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+			} else {
+				switch (b.blend) {
+					case BLEND_ADD:
+						C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_SRC_ALPHA, GPU_ONE);
+						break;
+					case BLEND_SUB:
+						C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT, GPU_SRC_ALPHA, GPU_ONE, GPU_SRC_ALPHA, GPU_ONE);
+						break;
+					case BLEND_MUL:
+						C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_COLOR, GPU_ZERO, GPU_DST_ALPHA, GPU_ZERO);
+						break;
+					case BLEND_PREMUL:
+						C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+						break;
+					case BLEND_DISABLED:
+						C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+						break;
+					default:
+						C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+						break;
+				}
 			}
-			bound_blend = b.blend;
+			bound_blend = blend_key;
 		}
 		if ((int)b.clip != bound_clip || (b.clip && b.clip_rect != bound_clip_rect)) {
 			if (b.clip) {
@@ -251,12 +314,44 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 	batches.clear();
 	batch_open = false;
 	current = Batch();
+	pending.clear();
+	canvas_modulate = p_modulate;
+
+	// 2D lights: positional ones carry a texture mapped by light_shader_xform
+	// (unit square -> render target pixels); directional ones light evenly.
+	lights.clear();
+	for (int list = 0; list < 2; list++) {
+		for (Light *l = list == 0 ? p_light_list : p_directional_list; l; l = l->next_ptr) {
+			if (!l->enabled || l->energy <= 0.0f) {
+				continue;
+			}
+			LightInfo info;
+			info.light = l;
+			info.texture = list == 0 ? ts->resolve_texture(l->texture) : nullptr;
+			if (list == 0 && !info.texture) {
+				continue;
+			}
+			info.to_uv = l->light_shader_xform.affine_inverse();
+			Color c = l->color * l->energy;
+			float peak = MAX(c.r, MAX(c.g, c.b));
+			info.scale = peak > 2.0f ? 4 : (peak > 1.0f ? 2 : 1);
+			info.color = Color(c.r / info.scale, c.g / info.scale, c.b / info.scale, l->color.a);
+			lights.push_back(info);
+		}
+	}
 
 	static bool warned_mesh = false;
 	for (Item *ci = p_item_list; ci; ci = ci->next) {
 		Transform2D base_xform = p_canvas_transform * ci->final_transform;
 		Transform2D xform = base_xform;
-		Color item_modulate = ci->final_modulate * p_modulate;
+		_emit_pending();
+		Color item_modulate = ci->final_modulate;
+		item_lights.clear();
+		for (const LightInfo &li : lights) {
+			if ((li.light->item_mask & ci->light_mask) && ci->z_final >= li.light->z_min && ci->z_final <= li.light->z_max) {
+				item_lights.push_back(&li);
+			}
+		}
 
 		RSE::CanvasItemTextureFilter filter = ci->texture_filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_DEFAULT ? p_default_filter : ci->texture_filter;
 		bool nearest = filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST || filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS || filter == RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC;
@@ -487,6 +582,7 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 			}
 		}
 	}
+	_emit_pending();
 	_flush();
 
 	if (batches.is_empty()) {
