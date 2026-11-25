@@ -1,0 +1,17 @@
+# Documentation site
+
+Static HTML built from the platform guide (`platform/3ds/README.md`) and the
+class reference XML in `platform/3ds/doc_classes/`.
+
+Rebuild after changing either source:
+
+```bash
+python3 docs-site/build.py --out docs-site/site \
+    --title "Godot for the Nintendo 3DS" --home-title "Documentation" \
+    --guide guide "3DS platform guide" platform/3ds/README.md \
+    --class-dir platform/3ds/doc_classes
+```
+
+Needs Python 3 and the `markdown` package (`pip install markdown`). Open
+`site/index.html` in a browser, or serve the `site/` folder with any static
+host. Pages have no scripts and no external fonts.
