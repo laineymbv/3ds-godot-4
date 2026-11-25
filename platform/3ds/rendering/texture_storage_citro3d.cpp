@@ -30,12 +30,19 @@
 
 #include "texture_storage_citro3d.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/image.h"
 
 using namespace Citro3D;
 
 TextureStorage::TextureStorage() {
 	singleton = this;
+	// 0 = 16-bit on the original 3DS only, 1 = always, 2 = never.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/3ds/textures/format", PROPERTY_HINT_ENUM, "Auto,16-bit,Full"), 0);
+	bool is_new = false;
+	APT_CheckNew3DS(&is_new);
+	int mode = GLOBAL_GET("rendering/3ds/textures/format");
+	compact_textures = mode == 1 || (mode == 0 && !is_new);
 }
 
 TextureStorage::~TextureStorage() {
@@ -217,8 +224,26 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 			}
 			fmt = GPU_RGBA8;
 			bpp = 4;
+			if (compact_textures) {
+				// Half the memory: opaque -> RGB565, cut-out alpha -> RGBA5551,
+				// soft alpha -> RGBA4444.
+				bool any_alpha = false, soft_alpha = false;
+				const uint8_t *px = img->ptr();
+				for (int64_t i = 3, n = (int64_t)iw * ih * 4; i < n; i += 4) {
+					if (px[i] != 255) {
+						any_alpha = true;
+						if (px[i] != 0) {
+							soft_alpha = true;
+							break;
+						}
+					}
+				}
+				fmt = !any_alpha ? GPU_RGB565 : (soft_alpha ? GPU_RGBA4 : GPU_RGBA5551);
+				bpp = 2;
+			}
 			break;
 	}
+	const bool rgba_source = img->get_format() == Image::FORMAT_RGBA8;
 
 	// Images imported with mipmaps (3D textures, by default) get a full GPU
 	// mip chain down to 8x8, built on the CPU from the padded image.
@@ -274,9 +299,29 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 		memset(dst, 0, lw * lh * bpp);
 		for (int y = 0; y < ch; y++) {
 			for (int x = 0; x < cw; x++) {
-				const uint8_t *sp = src + (y * mw + x) * bpp;
+				const uint8_t *sp = src + (y * mw + x) * (rgba_source ? 4 : bpp);
 				uint8_t *d = dst + image_offset(x, y, lw, lh) * bpp;
-				if (bpp == 4) {
+				if (rgba_source && bpp == 2) {
+					// Ordered dither (4x4 Bayer) hides the banding of fewer bits.
+					static const int8_t bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+					int t = bayer[(y & 3) * 4 + (x & 3)]; // 0..15
+					u16 v;
+					if (fmt == GPU_RGBA4) {
+						auto q4 = [&](int c) { return (uint16_t)MIN(15, (c + t) >> 4); };
+						v = (q4(sp[0]) << 12) | (q4(sp[1]) << 8) | (q4(sp[2]) << 4) | ((sp[3] * 15 + 127) / 255);
+					} else {
+						// 5 bits drop 3 (range 8), 6 bits drop 2 (range 4).
+						auto q5 = [&](int c) { return (uint16_t)MIN(31, (c + (t >> 1)) >> 3); };
+						auto q6 = [&](int c) { return (uint16_t)MIN(63, (c + (t >> 2)) >> 2); };
+						if (fmt == GPU_RGB565) {
+							v = (q5(sp[0]) << 11) | (q6(sp[1]) << 5) | q5(sp[2]);
+						} else {
+							v = (q5(sp[0]) << 11) | (q5(sp[1]) << 6) | (q5(sp[2]) << 1) | (sp[3] >= 128 ? 1 : 0);
+						}
+					}
+					d[0] = v & 0xFF;
+					d[1] = v >> 8;
+				} else if (bpp == 4) {
 					d[0] = sp[3];
 					d[1] = sp[2];
 					d[2] = sp[1];
@@ -366,8 +411,41 @@ void TextureStorage::texture_3d_placeholder_initialize(RID p_texture) {
 Ref<Image> TextureStorage::_read_back(const C3D_Tex &p_tex, GPU_TEXCOLOR p_format, int p_width, int p_height) const {
 	int tw = p_tex.width;
 	int th = p_tex.height;
-	int bpp = p_format == GPU_RGBA8 ? 4 : (p_format == GPU_LA8 ? 2 : (p_format == GPU_L8 ? 1 : 0));
+	bool packed16 = p_format == GPU_RGB565 || p_format == GPU_RGBA5551 || p_format == GPU_RGBA4;
+	int bpp = p_format == GPU_RGBA8 ? 4 : (p_format == GPU_LA8 || packed16 ? 2 : (p_format == GPU_L8 ? 1 : 0));
 	ERR_FAIL_COND_V(bpp == 0, Ref<Image>());
+	if (packed16) {
+		// Expand to RGBA8 for scripts.
+		Vector<uint8_t> px;
+		px.resize(p_width * p_height * 4);
+		uint8_t *o = px.ptrw();
+		GSPGPU_InvalidateDataCache(p_tex.data, p_tex.size);
+		const uint8_t *in = (const uint8_t *)p_tex.data;
+		for (int y = 0; y < p_height; y++) {
+			for (int x = 0; x < p_width; x++) {
+				const uint8_t *s = in + image_offset(x, y, tw, th) * 2;
+				uint16_t v = s[0] | (s[1] << 8);
+				uint8_t *d = o + (y * p_width + x) * 4;
+				if (p_format == GPU_RGB565) {
+					d[0] = ((v >> 11) & 31) * 255 / 31;
+					d[1] = ((v >> 5) & 63) * 255 / 63;
+					d[2] = (v & 31) * 255 / 31;
+					d[3] = 255;
+				} else if (p_format == GPU_RGBA5551) {
+					d[0] = ((v >> 11) & 31) * 255 / 31;
+					d[1] = ((v >> 6) & 31) * 255 / 31;
+					d[2] = ((v >> 1) & 31) * 255 / 31;
+					d[3] = (v & 1) ? 255 : 0;
+				} else {
+					d[0] = ((v >> 12) & 15) * 17;
+					d[1] = ((v >> 8) & 15) * 17;
+					d[2] = ((v >> 4) & 15) * 17;
+					d[3] = (v & 15) * 17;
+				}
+			}
+		}
+		return Image::create_from_data(p_width, p_height, false, Image::FORMAT_RGBA8, px);
+	}
 	Image::Format out_fmt = bpp == 4 ? Image::FORMAT_RGBA8 : (bpp == 2 ? Image::FORMAT_LA8 : Image::FORMAT_L8);
 	Vector<uint8_t> data;
 	data.resize(p_width * p_height * bpp);

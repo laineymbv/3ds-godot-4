@@ -51,6 +51,12 @@ def get_opts():
 
     return [
         ("linear_heap_mb", "GPU-visible (linear) heap in MiB; 0 = 30% of free memory at start, 8-32 MiB", 0),
+        (
+            "app_memory_limit_mb",
+            "Use at most this much memory (heap + linear heap) even if more is free; 0 = all. "
+            "Rehearses an original 3DS (about 44 MB free after the code) on a New 3DS or in an emulator",
+            0,
+        ),
     ]
 
 
@@ -156,6 +162,7 @@ def configure(env: "SConsEnvironment"):
         ]
     )
     env.Append(CPPDEFINES=[("THREEDS_LINEAR_HEAP_MB", int(env["linear_heap_mb"]))])
+    env.Append(CPPDEFINES=[("THREEDS_MEMORY_LIMIT_MB", int(env["app_memory_limit_mb"]))])
     env.Append(LINKFLAGS=["-Wl,--wrap=__system_allocateHeaps", "-Wl,--wrap=pthread_create"])
 
     env.Append(

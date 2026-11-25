@@ -54,18 +54,30 @@ extern u32 __ctru_linear_heap_size;
 void __real___system_allocateHeaps(void);
 
 void __wrap___system_allocateHeaps(void) {
-#if THREEDS_LINEAR_HEAP_MB > 0
-	__ctru_linear_heap_size = THREEDS_LINEAR_HEAP_MB * 1024 * 1024;
-#else
-	u32 remaining = osGetMemRegionFree(MEMREGION_APPLICATION) & ~0xFFFFF;
-	u32 linear = (remaining / 10) * 3; // 30 %
 	const u32 mib = 1024 * 1024;
+	u32 remaining = osGetMemRegionFree(MEMREGION_APPLICATION) & ~(mib - 1);
+#if THREEDS_MEMORY_LIMIT_MB > 0
+	if (remaining > THREEDS_MEMORY_LIMIT_MB * mib) {
+		remaining = THREEDS_MEMORY_LIMIT_MB * mib;
+	}
+#endif
+#if THREEDS_LINEAR_HEAP_MB > 0
+	u32 linear = THREEDS_LINEAR_HEAP_MB * mib;
+#else
+	u32 linear = (remaining / 10) * 3; // 30 %
 	if (linear < 8 * mib) {
 		linear = 8 * mib;
 	} else if (linear > 32 * mib) {
 		linear = 32 * mib;
 	}
+#endif
 	__ctru_linear_heap_size = linear & ~(mib - 1);
+#if THREEDS_MEMORY_LIMIT_MB > 0
+	// Without a cap libctru gives the normal heap everything that is left.
+	if (remaining > __ctru_linear_heap_size) {
+		extern u32 __ctru_heap_size;
+		__ctru_heap_size = remaining - __ctru_linear_heap_size;
+	}
 #endif
 	__real___system_allocateHeaps();
 }

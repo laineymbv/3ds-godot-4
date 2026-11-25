@@ -91,6 +91,7 @@ struct RenderTarget {
 
 class TextureStorage : public RendererDummy::TextureStorage {
 	static inline TextureStorage *singleton = nullptr;
+	bool compact_textures = false; // 16-bit texel formats (see rendering/3ds/textures/format).
 
 	mutable RID_Owner<Texture, true> texture_owner;
 	mutable RID_Owner<CanvasTexture, true> canvas_texture_owner;

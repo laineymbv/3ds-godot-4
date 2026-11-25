@@ -22,6 +22,37 @@ Options (pass to `build.sh`):
   By default it is 30% of the memory free at start, 8-32 MiB, so the same
   build fits a 64 MB Homebrew Launcher slot and a 124 MB New 3DS CIA.
 
+## Original 3DS (64 MB, 268 MHz)
+
+The same template runs on the original 3DS and 2DS, with less room: about
+44 MB are free after the 20 MB of code, and the CPU is three times slower
+(the GPU is the same). What helps:
+
+- **Smaller template.** `tools/make_profile.py` scans a project (scenes,
+  scripts, imported models) and writes a build profile that leaves out the
+  node classes it never uses:
+
+  ```sh
+  python3 platform/3ds/tools/make_profile.py ~/game --godot bin/godot.linuxbsd.editor.x86_64 -o bin/profiles/game.json
+  platform/3ds/build.sh target=template_release build_profile=bin/profiles/game.json
+  ```
+
+  The platformer's template went from 20.5 to 17.8 MB this way. The profile
+  must be inside the Godot folder (the build runs in Docker). A class the scan
+  can't see, such as one built from a string, goes in `--keep`; the game
+  prints "Cannot get class" if one is missing. Several games can share one
+  template with `--also-project`.
+- **16-bit textures.** `rendering/3ds/textures/format`: Auto (default) stores
+  textures as RGB565, RGBA5551 or RGBA4444 on the original 3DS and in full
+  RGBA8 on the New 3DS; "16-bit" and "Full" force one. Half the texture
+  memory, dithered. `Image` readback returns RGBA8 either way.
+- **Rehearsing the memory budget.** `app_memory_limit_mb=40` builds a template
+  that uses at most 40 MB for heap + linear heap, even in an emulator or on a
+  New 3DS. The platformer runs normally at 40 and at 28 MB; at 22 it runs out.
+  Azahar's CPU timing isn't accurate, so speed still needs real hardware.
+- `Nintendo3DS.is_new_3ds()` lets a game scale effects down (fewer particles,
+  shadows off) on the slower CPU.
+
 ## Making a game
 
 ### From the editor (recommended)
