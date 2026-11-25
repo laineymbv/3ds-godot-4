@@ -893,11 +893,11 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 	}
 
 	shadow_active = _render_shadow_map(p_lights, p_camera_data);
+	// Never bind null: citro3d dereferences the texture (a data abort on
+	// hardware; Azahar tolerates it). Unused units are simply not sampled.
 	if (shadow_active) {
 		C3D_TexBind(0, &shadow_tex);
 		C3D_TexShadowParams(false, (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/bias"));
-	} else {
-		C3D_TexBind(0, nullptr);
 	}
 
 	for (int eye = 0; eye < eyes; eye++) {
@@ -941,8 +941,6 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 	ts->render_target_disable_clear_request(rb->render_target);
 
 	// The canvas draws next with its own buffers and state.
-	C3D_TexBind(0, nullptr);
-	C3D_TexBind(1, nullptr);
 	C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
 	C3D_LightEnvBind(nullptr);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
