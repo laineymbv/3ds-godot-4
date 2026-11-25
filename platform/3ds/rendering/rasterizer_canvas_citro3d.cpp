@@ -71,10 +71,11 @@ void RasterizerCanvasCitro3D::_set_state(Texture *p_tex, bool p_nearest, bool p_
 	command_state.blend = p_blend;
 	command_state.clip = p_clip;
 	command_state.clip_rect = p_clip_rect;
+	command_state.depth = item_depth;
 }
 
 void RasterizerCanvasCitro3D::_open_batch(const Batch &p_state) {
-	if (batch_open && current.texture == p_state.texture && current.nearest == p_state.nearest && current.repeat == p_state.repeat && current.blend == p_state.blend && current.clip == p_state.clip && (!p_state.clip || current.clip_rect == p_state.clip_rect) && current.light_pass == p_state.light_pass && current.light_subtract == p_state.light_subtract && current.light_texture == p_state.light_texture && current.light_scale == p_state.light_scale) {
+	if (batch_open && current.texture == p_state.texture && current.nearest == p_state.nearest && current.repeat == p_state.repeat && current.blend == p_state.blend && current.clip == p_state.clip && (!p_state.clip || current.clip_rect == p_state.clip_rect) && current.light_pass == p_state.light_pass && current.light_subtract == p_state.light_subtract && current.light_texture == p_state.light_texture && current.light_scale == p_state.light_scale && current.depth == p_state.depth) {
 		return;
 	}
 	_flush();
@@ -158,7 +159,7 @@ void RasterizerCanvasCitro3D::_add_quad(const Vector2 p_pos[4], const Vector2 p_
 	_add_triangle(b, bu, c);
 }
 
-void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
+void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt, int p_eye, int p_eye_count) {
 	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
 	r->bind_canvas_program();
 
@@ -166,6 +167,8 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
 	// y flipped like the scene, see projection_to_c3d().
 	Mtx_Ortho(&proj, 0.0f, (float)p_rt->size.x, 0.0f, (float)p_rt->size.y, 1.0f, -1.0f, true);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->canvas_uniforms.projection, &proj);
+	int bound_shift = 0;
+	const float slider = r->get_3d_slider();
 	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 	C3D_CullFace(GPU_CULL_NONE);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -179,6 +182,19 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
 	int bound_clip = -1;
 	Rect2i bound_clip_rect;
 	for (const Batch &b : batches) {
+		// Manual stereo depth: each eye sees the item shifted sideways, whole
+		// pixels so text and sprites stay sharp. Left eye shifts right for
+		// items in front of the screen.
+		int shift = 0;
+		if (p_eye_count == 2 && b.depth != 0.0f) {
+			shift = (int)Math::round(b.depth * slider * 0.5f) * (p_eye == 0 ? 1 : -1);
+		}
+		if (shift != bound_shift) {
+			Mtx_Ortho(&proj, (float)-shift, (float)(p_rt->size.x - shift), 0.0f, (float)p_rt->size.y, 1.0f, -1.0f, true);
+			C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->canvas_uniforms.projection, &proj);
+			bound_shift = shift;
+			bound_clip = -1; // The scissor moves with it.
+		}
 		if (b.texture) {
 			C3D_Tex *t = &b.texture->tex;
 			GPU_TEXTURE_FILTER_PARAM f = b.nearest ? GPU_NEAREST : GPU_LINEAR;
@@ -254,7 +270,7 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt) {
 		if ((int)b.clip != bound_clip || (b.clip && b.clip_rect != bound_clip_rect)) {
 			if (b.clip) {
 				// With the flipped projection, scissor rows match Godot's.
-				Rect2i c = b.clip_rect.intersection(Rect2i(Point2i(), p_rt->size));
+				Rect2i c = Rect2i(b.clip_rect.position + Point2i(shift, 0), b.clip_rect.size).intersection(Rect2i(Point2i(), p_rt->size));
 				C3D_SetScissor(GPU_SCISSOR_NORMAL, c.position.x, c.position.y, c.position.x + c.size.x, c.position.y + c.size.y);
 			} else {
 				C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -359,9 +375,16 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 		bool repeat = repeat_mode == RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED || repeat_mode == RSE::CANVAS_ITEM_TEXTURE_REPEAT_MIRROR;
 
 		BlendMode blend = BLEND_MIX;
+		item_depth = 0.0f;
 		RID material = ci->material_owner ? ci->material_owner->material : ci->material;
 		if (material.is_valid()) {
 			Material *m = ms->get_material(material);
+			if (m) {
+				const Variant *depth = m->params.getptr(StringName("stereo_depth"));
+				if (depth) {
+					item_depth = *depth;
+				}
+			}
 			Shader *s = m ? ms->get_shader(m->shader) : nullptr;
 			if (s) {
 				switch (s->info.blend) {
@@ -602,7 +625,7 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 	}
 	for (int eye = 0; eye < eyes; eye++) {
 		if (ts->render_target_begin(rt, eye)) {
-			_draw_batches(rt);
+			_draw_batches(rt, eye, eyes);
 		}
 	}
 }

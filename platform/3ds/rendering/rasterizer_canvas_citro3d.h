@@ -74,6 +74,8 @@ class RasterizerCanvasCitro3D : public RasterizerCanvasDummy {
 		BlendMode blend = BLEND_MIX;
 		bool clip = false;
 		Rect2i clip_rect;
+		// Stereo depth in pixels of disparity at full slider (+ = toward the viewer).
+		float depth = 0.0f;
 	};
 	LocalVector<Batch> batches;
 	Batch current;
@@ -98,6 +100,7 @@ class RasterizerCanvasCitro3D : public RasterizerCanvasDummy {
 	};
 	LocalVector<LightInfo> lights;
 	LocalVector<const LightInfo *> item_lights;
+	float item_depth = 0.0f; // From the item's material parameter "stereo_depth".
 	Color canvas_modulate = Color(1, 1, 1, 1); // Base pass only, as in Godot.
 
 	void _open_batch(const Batch &p_state);
@@ -107,7 +110,7 @@ class RasterizerCanvasCitro3D : public RasterizerCanvasDummy {
 	void _add_triangle(const Vector2 *p_pos, const Vector2 *p_uv, const Color *p_col);
 	void _add_quad(const Vector2 p_pos[4], const Vector2 p_uv[4], const Color &p_col);
 	void _add_mesh(RID p_mesh, const Transform2D &p_xform, const Color &p_modulate, Citro3D::Texture *p_tex);
-	void _draw_batches(Citro3D::RenderTarget *p_rt);
+	void _draw_batches(Citro3D::RenderTarget *p_rt, int p_eye, int p_eye_count);
 
 public:
 	void initialize() {}

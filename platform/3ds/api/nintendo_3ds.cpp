@@ -31,6 +31,9 @@
 #include "nintendo_3ds.h"
 
 #include "core/object/class_db.h"
+#include "scene/main/canvas_item.h"
+#include "scene/resources/material.h"
+#include "scene/resources/shader.h"
 
 #ifdef THREEDS_ENABLED
 #include "platform/3ds/ctru.h"
@@ -47,8 +50,69 @@ void Nintendo3DS::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_stereo_separation"), &Nintendo3DS::get_stereo_separation);
 	ClassDB::bind_method(D_METHOD("set_stereo_convergence", "convergence"), &Nintendo3DS::set_stereo_convergence);
 	ClassDB::bind_method(D_METHOD("get_stereo_convergence"), &Nintendo3DS::get_stereo_convergence);
+	ClassDB::bind_method(D_METHOD("set_depth", "item", "depth", "recursive"), &Nintendo3DS::set_depth, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("get_depth", "item"), &Nintendo3DS::get_depth);
 	ClassDB::bind_method(D_METHOD("save_screens", "dir"), &Nintendo3DS::save_screens);
 	ClassDB::bind_method(D_METHOD("get_audio_stats"), &Nintendo3DS::get_audio_stats);
+}
+
+static Ref<Shader> _depth_shader() {
+	static Ref<Shader> shader;
+	if (shader.is_null()) {
+		shader.instantiate();
+		shader->set_code("shader_type canvas_item;\nuniform float stereo_depth = 0.0;\nvoid fragment() {}\n");
+	}
+	return shader;
+}
+
+// Descendants without a material of their own draw with their parent's, so
+// the whole subtree shares one depth.
+static void _inherit_material(CanvasItem *p_item) {
+	for (int i = 0; i < p_item->get_child_count(); i++) {
+		CanvasItem *child = Object::cast_to<CanvasItem>(p_item->get_child(i));
+		if (!child) {
+			continue;
+		}
+		if (child->get_material().is_null()) {
+			child->set_use_parent_material(true);
+		}
+		if (child->get_use_parent_material()) {
+			_inherit_material(child);
+		}
+	}
+}
+
+void Nintendo3DS::set_depth(CanvasItem *p_item, float p_depth, bool p_recursive) {
+	ERR_FAIL_NULL(p_item);
+	Ref<ShaderMaterial> mat = p_item->get_material();
+	if (mat.is_null() || mat->get_shader() != _depth_shader()) {
+		if (p_item->get_material().is_valid() && mat.is_null()) {
+			WARN_PRINT(vformat("Nintendo3DS.set_depth: %s already has a different material; it is replaced.", p_item->get_name()));
+		}
+		mat.instantiate();
+		mat->set_shader(_depth_shader());
+		p_item->set_material(mat);
+	}
+	mat->set_shader_parameter("stereo_depth", p_depth);
+	if (p_recursive) {
+		_inherit_material(p_item);
+	}
+}
+
+float Nintendo3DS::get_depth(CanvasItem *p_item) const {
+	ERR_FAIL_NULL_V(p_item, 0.0f);
+	// An item using its parent's material has the parent's depth.
+	while (p_item && p_item->get_material().is_null() && p_item->get_use_parent_material()) {
+		p_item = Object::cast_to<CanvasItem>(p_item->get_parent());
+	}
+	Ref<ShaderMaterial> mat;
+	if (p_item) {
+		mat = p_item->get_material();
+	}
+	if (mat.is_null() || mat->get_shader() != _depth_shader()) {
+		return 0.0f;
+	}
+	return mat->get_shader_parameter("stereo_depth");
 }
 
 float Nintendo3DS::get_3d_slider() const {

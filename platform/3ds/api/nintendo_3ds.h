@@ -33,6 +33,8 @@
 #include "core/object/object.h"
 #include "core/variant/dictionary.h"
 
+class CanvasItem;
+
 // Script access to 3DS-specific features. Exists in every build so scripts
 // type-check in the editor; off-device it returns neutral values.
 class Nintendo3DS : public Object {
@@ -56,6 +58,14 @@ public:
 	float get_stereo_separation() const;
 	void set_stereo_convergence(float p_convergence);
 	float get_stereo_convergence() const;
+
+	// Manual stereo depth for 2D: pixels of disparity at full slider (+ pops
+	// out of the screen, - sinks behind it; 0 = on the screen plane). Gives the
+	// item a material with a "stereo_depth" parameter; with p_recursive the
+	// descendants that have no material of their own use it too. Keep depths
+	// small (about -6..+6): large shifts are hard to look at.
+	void set_depth(CanvasItem *p_item, float p_depth, bool p_recursive = true);
+	float get_depth(CanvasItem *p_item) const;
 
 	// Writes top_left.png, top_right.png and bottom.png (what the screens
 	// show) into p_dir after the current frame.

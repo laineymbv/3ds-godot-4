@@ -141,7 +141,7 @@ void MaterialStorage::_parse_shader(Shader *p_shader) {
 			WARN_PRINT(vformat("3DS: shader %s can't run on the PICA200 (%s); it draws unshaded with its 'albedo'/'color' and 'texture_albedo'/'texture' parameters.", p_shader->path.is_empty() ? String("(embedded)") : p_shader->path, p_shader->recipe.failure));
 			s.unshaded = true;
 		}
-	} else if (s.kind == Shader::KIND_CANVAS_ITEM && !canvas_generated) {
+	} else if (s.kind == Shader::KIND_CANVAS_ITEM && !canvas_generated && !code.contains("stereo_depth")) {
 		WARN_PRINT_ONCE("3DS: custom canvas_item shaders aren't supported; items draw with the default 2D pipeline.");
 	}
 }

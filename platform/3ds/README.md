@@ -146,7 +146,31 @@ on the screen plane; nearer objects come out of the screen.
 - `rendering/3ds/stereo/convergence` (default 3.0): distance from the camera
   with zero parallax.
 
-2D canvas items draw at zero parallax (on the screen plane).
+2D canvas items draw at zero parallax (on the screen plane) unless given a
+depth.
+
+### Manual depth for 2D
+
+Any `CanvasItem` (and so a whole HUD or layer of sprites) can sit in front of
+or behind the screen. Depth is in pixels of disparity at full slider: `+` pops
+out, `-` sinks in, `0` is the screen plane. Each eye sees the item shifted
+sideways by half of it times the slider, rounded to whole pixels so text and
+sprites stay sharp. Keep depths small (about -6 to +6); big shifts hurt to
+look at.
+
+```gdscript
+var n3ds = Engine.get_singleton("Nintendo3DS")
+n3ds.set_depth($Hud, 3.0)           # the HUD and everything under it
+n3ds.set_depth($Sky, -5.0, false)   # this item only
+```
+
+`set_depth` gives the item a `ShaderMaterial` with a `stereo_depth` parameter;
+descendants without a material of their own use it too (`use_parent_material`).
+A descendant with its own material keeps it and sits at depth 0, unless you
+call `set_depth` on it. In the editor you can do the same by hand: assign a
+`ShaderMaterial` whose canvas_item shader declares `uniform float
+stereo_depth;`, and animate or tween that parameter. A clipped item's clip
+rectangle moves with it.
 
 ## Input
 
