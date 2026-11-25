@@ -1,0 +1,58 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import os
+
+Import("env")
+
+files = [
+    "godot_3ds.cpp",
+    "os_3ds.cpp",
+    "display_server_3ds.cpp",
+    "joypad_3ds.cpp",
+    "audio_driver_3ds.cpp",
+    "posix_stubs.c",
+]
+
+# 3dsx.specs links with --emit-relocs for 3dsxtool, which `-s` breaks
+# ("final link failed: invalid operation"). 3dsxtool drops symbols anyway.
+env_3ds = env.Clone()
+env_3ds["LINKFLAGS"] = [f for f in env_3ds["LINKFLAGS"] if f != "-s"]
+
+# PICA200 vertex shaders: picasso -> .shbin -> C header with a byte array.
+def build_pica_header(target, source, env):
+    import subprocess
+
+    shbin = str(target[0]) + ".shbin"
+    subprocess.check_call(["picasso", "-o", shbin, str(source[0])], env=env["ENV"])
+    data = open(shbin, "rb").read()
+    name = os.path.basename(str(source[0])).split(".")[0]
+    with open(str(target[0]), "w") as f:
+        f.write("/* Generated from %s by picasso. */\n#pragma once\n#include <cstdint>\n" % os.path.basename(str(source[0])))
+        f.write("alignas(4) static const uint8_t shader_%s_shbin[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
+        f.write("static const uint32_t shader_%s_shbin_size = %d;\n" % (name, len(data)))
+
+
+for shader in ["scene", "canvas"]:
+    env_3ds.Command(
+        "rendering/shaders/%s.v.pica.gen.h" % shader,
+        "rendering/shaders/%s.v.pica" % shader,
+        env_3ds.Run(build_pica_header),
+    )
+
+files += Glob("rendering/*.cpp")
+
+prog = env_3ds.add_program("#bin/godot", files)
+
+# Wrap the ELF in a .3dsx the Homebrew Launcher can run. The game's .pck goes
+# into romfs/ (see README.md), so the template is a self-contained file.
+smdh = env_3ds.Command(
+    "#bin/godot.3ds.smdh",
+    "icon.png",
+    'smdhtool --create "Godot Engine" "Godot 4 for Nintendo 3DS" "Godot contributors" $SOURCE $TARGET',
+)
+env_3ds.Command(
+    str(prog[0]).replace(".elf", "") + ".3dsx",
+    [prog, smdh],
+    "3dsxtool ${SOURCES[0]} $TARGET --smdh=${SOURCES[1]}",
+)
