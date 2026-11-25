@@ -115,7 +115,11 @@ private:
 	Color sky_colors_cache[4];
 	bool sky_colors_valid = false;
 	Color sky_ambient;
-	bool _draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, Color &r_ambient);
+	bool _draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, const PagedArray<RID> &p_lights, Color &r_ambient);
+	void _draw_sun_disks(const PagedArray<RID> &p_lights, const Transform3D &p_view, float p_radius, float p_angle_max, float p_exposure);
+	C3D_Tex sun_tex;
+	bool sun_tex_ready = false;
+	Citro3D::Vertex *sun_vertices = nullptr; // 4 per sun, up to 4 suns.
 
 	// Shadows: one directional light, an orthographic shadow map around the
 	// camera, rendered in the PICA200's shadow mode and read by the lighting
@@ -124,6 +128,7 @@ private:
 	C3D_RenderTarget *shadow_target = nullptr;
 	int shadow_size = 0;
 	bool shadow_active = false;
+	bool shadow_perspective = false;
 	RID shadow_light_instance;
 	Projection shadow_projview; // Godot-style projection * light view.
 	bool _render_shadow_map(const PagedArray<RID> &p_lights, const CameraData *p_camera_data);

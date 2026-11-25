@@ -6,7 +6,7 @@
 .fvec uvTransform    ; xy = scale, zw = offset
 .fvec colorScale     ; vertex color is color * colorScale + colorBias,
 .fvec colorBias      ; so (1,0) uses COLOR and (0,1) ignores it.
-.fvec shadowMtx[3]   ; view space -> shadow map (u, v, depth)
+.fvec shadowMtx[4]   ; view space -> shadow map (u, v, depth, w)
 
 ; Constants
 .constf myconst(0.0, 1.0, -1.0, 0.5)
@@ -58,6 +58,10 @@
 	dp4 r7.x, shadowMtx[0], r1
 	dp4 r7.y, shadowMtx[1], r1
 	dp4 r7.z, shadowMtx[2], r1
+	dp4 r7.w, shadowMtx[3], r1
+	; Perspective divide (w = 1 for directional lights).
+	rcp r8.x, r7.w
+	mul r7.xyz, r8.xxxx, r7.xyz
 	; Beyond the light's far plane nothing casts: keep it lit.
 	min r7.z, depthclamp.xxxx, r7.z
 	mov r7.w, ones

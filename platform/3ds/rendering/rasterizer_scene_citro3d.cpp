@@ -94,6 +94,11 @@ void RasterizerSceneCitro3D::initialize() {
 }
 
 void RasterizerSceneCitro3D::finalize() {
+	if (sun_tex_ready) {
+		C3D_TexDelete(&sun_tex);
+		linearFree(sun_vertices);
+		sun_tex_ready = false;
+	}
 	if (shadow_target) {
 		C3D_RenderTargetDelete(shadow_target);
 		C3D_TexDelete(&shadow_tex);
@@ -142,7 +147,94 @@ static float _sky_param_float(const Material *p_m, const char *p_name, float p_d
 	return (v && (v->get_type() == Variant::FLOAT || v->get_type() == Variant::INT)) ? float(*v) : p_default;
 }
 
-bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, Color &r_ambient) {
+void RasterizerSceneCitro3D::_draw_sun_disks(const PagedArray<RID> &p_lights, const Transform3D &p_view, float p_radius, float p_angle_max, float p_exposure) {
+	if (!sun_tex_ready) {
+		// Soft disc: a bright core and a glow falling off to the edge.
+		const int S = 64;
+		if (!C3D_TexInit(&sun_tex, S, S, GPU_RGBA8)) {
+			return;
+		}
+		uint8_t *d = (uint8_t *)sun_tex.data;
+		for (int y = 0; y < S; y++) {
+			for (int x = 0; x < S; x++) {
+				float dx = (x + 0.5f) / S * 2.0f - 1.0f, dy = (y + 0.5f) / S * 2.0f - 1.0f;
+				float r = Math::sqrt(dx * dx + dy * dy);
+				float core = CLAMP((0.09f - r) / 0.02f, 0.0f, 1.0f);
+				float glow = Math::pow(MAX(1.0f - r, 0.0f), 4.0f) * 0.55f;
+				uint8_t a = (uint8_t)(CLAMP(core + glow, 0.0f, 1.0f) * 255.0f);
+				uint8_t *p = d + image_offset(x, y, S, S) * 4;
+				p[0] = a;
+				p[1] = p[2] = p[3] = 255;
+			}
+		}
+		C3D_TexFlush(&sun_tex);
+		C3D_TexSetFilter(&sun_tex, GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&sun_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		sun_vertices = (Vertex *)linearAlloc(sizeof(Vertex) * 16);
+		sun_tex_ready = sun_vertices != nullptr;
+		if (!sun_tex_ready) {
+			return;
+		}
+	}
+	LightStorage *ls = LightStorage::get_singleton();
+	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
+	int count = 0;
+	float half = p_radius * Math::tan(CLAMP(p_angle_max, 0.05f, 1.2f));
+	for (uint32_t i = 0; i < p_lights.size() && count < 4; i++) {
+		LightInstance *li = ls->get_light_instance(p_lights[i]);
+		Light *l = li ? ls->get_light(li->light) : nullptr;
+		if (!l || l->type != RSE::LIGHT_DIRECTIONAL || l->param[RSE::LIGHT_PARAM_ENERGY] <= 0.0f) {
+			continue;
+		}
+		Vector3 dir = li->transform.basis.get_column(2).normalized(); // Towards the light.
+		Vector3 up = Math::abs(dir.y) > 0.95f ? Vector3(1, 0, 0) : Vector3(0, 1, 0);
+		Vector3 right = up.cross(dir).normalized() * half;
+		Vector3 top = dir.cross(right).normalized() * half;
+		Vector3 c = dir * p_radius * 0.98f;
+		Color col = l->color * l->param[RSE::LIGHT_PARAM_ENERGY] * p_exposure;
+		Vector3 corners[4] = { c - right + top, c - right - top, c + right + top, c + right - top };
+		const float uvs[4][2] = { { 0, 0 }, { 0, 1 }, { 1, 0 }, { 1, 1 } };
+		for (int k = 0; k < 4; k++) {
+			Vertex &v = sun_vertices[count * 4 + k];
+			v.position[0] = corners[k].x;
+			v.position[1] = corners[k].y;
+			v.position[2] = corners[k].z;
+			v.normal[0] = 0;
+			v.normal[1] = 1;
+			v.normal[2] = 0;
+			v.uv[0] = uvs[k][0];
+			v.uv[1] = uvs[k][1];
+			v.color[0] = (uint8_t)CLAMP(col.r * 255.0f, 0.0f, 255.0f);
+			v.color[1] = (uint8_t)CLAMP(col.g * 255.0f, 0.0f, 255.0f);
+			v.color[2] = (uint8_t)CLAMP(col.b * 255.0f, 0.0f, 255.0f);
+			v.color[3] = 255;
+		}
+		count++;
+	}
+	if (count == 0) {
+		return;
+	}
+	GSPGPU_FlushDataCache(sun_vertices, sizeof(Vertex) * 16);
+	C3D_Mtx mtx;
+	_transform_to_mtx(Transform3D(p_view.basis, Vector3()), &mtx);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mtx);
+	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, 1, 1, 0, 0);
+	C3D_TexBind(1, &sun_tex);
+	C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(e0);
+	C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+	C3D_BufInfo *bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, sun_vertices, sizeof(Vertex), 4, 0x3210);
+	for (int i = 0; i < count; i++) {
+		C3D_DrawArrays(GPU_TRIANGLE_STRIP, i * 4, 4);
+	}
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+}
+
+bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_view, const Projection &p_proj, const PagedArray<RID> &p_lights, Color &r_ambient) {
 	Sky *sky = sky_owner.get_or_null(environment_get_sky(p_environment));
 	Material *m = sky ? MaterialStorage::get_singleton()->get_material(sky->material) : nullptr;
 	if (!m) {
@@ -288,6 +380,11 @@ bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_v
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, sky_vertices, sizeof(Vertex), 4, 0x3210);
 	C3D_DrawElements(GPU_TRIANGLES, sky_index_count, C3D_UNSIGNED_SHORT, sky_indices);
+	if (!pano) {
+		// Sun discs for directional lights (procedural and physical skies).
+		float angle_max = Math::acos(CLAMP(_sky_param_float(m, "sun_angle_max", Math::cos(Math::deg_to_rad(30.0f))), -1.0f, 1.0f));
+		_draw_sun_disks(p_lights, p_view, radius, angle_max * 0.35f, exposure);
+	}
 	return true;
 }
 
@@ -432,6 +529,9 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 	C3D_LightEnvBind(&light_env);
 	C3D_LightEnvAmbient(&light_env, p_ambient.r, p_ambient.g, p_ambient.b);
 	C3D_LightEnvLut(&light_env, GPU_LUT_D0, GPU_LUTINPUT_NH, false, &specular_luts[0]);
+	// Spot lights read their cone table by the spot angle (signed), not by
+	// the default N.H input; the tables themselves are per light.
+	C3D_LightEnvLut(&light_env, GPU_LUT_SP, GPU_LUTINPUT_SP, true, nullptr);
 	bound_specular = 0;
 	if (shadow_active) {
 		C3D_LightEnvShadowMode(&light_env, GPU_SHADOW_PRIMARY | GPU_SHADOW_SECONDARY);
@@ -484,7 +584,7 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 				LightLut_FromFunc(&light_spot[i], _spot_soft_step, Math::cos(angle), true);
 				key.spot_angle = angle;
 			}
-			Vector3 dir = p_view.basis.xform(-lx.basis.get_column(2)).normalized();
+			Vector3 dir = p_view.basis.xform(-lx.basis.get_column(2)).normalized(); // Beam direction.
 			C3D_LightSpotEnable(pl, true);
 			C3D_LightSpotDir(pl, dir.x, dir.y, dir.z);
 			C3D_LightSpotLut(pl, &light_spot[i]);
@@ -700,21 +800,27 @@ void RasterizerSceneCitro3D::_draw_list(LocalVector<DrawItem> &p_list, const Tra
 
 bool RasterizerSceneCitro3D::_render_shadow_map(const PagedArray<RID> &p_lights, const CameraData *p_camera_data) {
 	LightStorage *ls = LightStorage::get_singleton();
+	// One shadow map: the first shadowed directional light, else the first
+	// shadowed spot light (omni shadows would need six passes).
 	LightInstance *li = nullptr;
 	Light *light = nullptr;
-	for (uint32_t i = 0; i < p_lights.size(); i++) {
-		LightInstance *cand = ls->get_light_instance(p_lights[i]);
-		Light *l = cand ? ls->get_light(cand->light) : nullptr;
-		if (l && l->shadow && l->type == RSE::LIGHT_DIRECTIONAL) {
-			li = cand;
-			light = l;
-			shadow_light_instance = p_lights[i];
-			break;
+	for (int pass = 0; pass < 2 && !li; pass++) {
+		RSE::LightType want = pass == 0 ? RSE::LIGHT_DIRECTIONAL : RSE::LIGHT_SPOT;
+		for (uint32_t i = 0; i < p_lights.size(); i++) {
+			LightInstance *cand = ls->get_light_instance(p_lights[i]);
+			Light *l = cand ? ls->get_light(cand->light) : nullptr;
+			if (l && l->shadow && l->type == want) {
+				li = cand;
+				light = l;
+				shadow_light_instance = p_lights[i];
+				break;
+			}
 		}
 	}
 	if (!li) {
 		return false;
 	}
+	shadow_perspective = light->type == RSE::LIGHT_SPOT;
 
 	int size = CLAMP(Math::next_power_of_2((uint32_t)(int)GLOBAL_GET_CACHED(int, "rendering/3ds/shadows/size")), 128u, 1024u);
 	if (size != shadow_size || !shadow_target) {
@@ -737,24 +843,33 @@ bool RasterizerSceneCitro3D::_render_shadow_map(const PagedArray<RID> &p_lights,
 		C3D_TexSetFilter(&shadow_tex, GPU_NEAREST, GPU_NEAREST);
 	}
 
-	// An orthographic box around the part of the view nearest the camera.
-	float max_dist = MIN(light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE], (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/max_distance"));
-	max_dist = MAX(max_dist, 1.0f);
-	const Transform3D &cam = p_camera_data->main_transform;
-	Vector3 center = cam.origin - cam.basis.get_column(2) * (max_dist * 0.5f);
-	float radius = max_dist * 0.6f;
-	Basis lb = li->transform.basis.orthonormalized();
-	// Snap the center to shadow texels so edges don't crawl as the camera moves.
-	float texel = (radius * 2.0f) / size;
-	Vector3 lc = lb.xform_inv(center);
-	lc.x = Math::floor(lc.x / texel) * texel;
-	lc.y = Math::floor(lc.y / texel) * texel;
-	center = lb.xform(lc);
-	// Depth is only 8 bits (alpha), so keep the light's depth range tight:
-	// just the sphere around the shadowed area.
-	Transform3D light_view = Transform3D(lb, center + lb.get_column(2) * radius * 1.1f).affine_inverse();
+	Transform3D light_view;
 	Projection proj;
-	proj.set_orthogonal(-radius, radius, -radius, radius, 0.05f, radius * 2.2f);
+	if (shadow_perspective) {
+		// The spot light's own cone.
+		float angle = CLAMP(light->param[RSE::LIGHT_PARAM_SPOT_ANGLE], 1.0f, 89.0f);
+		float range = MAX(light->param[RSE::LIGHT_PARAM_RANGE], 0.1f);
+		light_view = li->transform.orthonormalized().affine_inverse();
+		proj.set_perspective(angle * 2.0f, 1.0f, MAX(range * 0.01f, 0.05f), range);
+	} else {
+		// An orthographic box around the part of the view nearest the camera.
+		float max_dist = MIN(light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE], (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/max_distance"));
+		max_dist = MAX(max_dist, 1.0f);
+		const Transform3D &cam = p_camera_data->main_transform;
+		Vector3 center = cam.origin - cam.basis.get_column(2) * (max_dist * 0.5f);
+		float radius = max_dist * 0.6f;
+		Basis lb = li->transform.basis.orthonormalized();
+		// Snap the center to shadow texels so edges don't crawl as the camera moves.
+		float texel = (radius * 2.0f) / size;
+		Vector3 lc = lb.xform_inv(center);
+		lc.x = Math::floor(lc.x / texel) * texel;
+		lc.y = Math::floor(lc.y / texel) * texel;
+		center = lb.xform(lc);
+		// Depth is only 8 bits (alpha), so keep the light's depth range tight:
+		// just the sphere around the shadowed area.
+		light_view = Transform3D(lb, center + lb.get_column(2) * radius * 1.1f).affine_inverse();
+		proj.set_orthogonal(-radius, radius, -radius, radius, 0.05f, radius * 2.2f);
+	}
 	shadow_projview = proj * Projection(light_view);
 
 	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
@@ -816,14 +931,16 @@ void RasterizerSceneCitro3D::_set_shadow_matrix(const Transform3D &p_view) {
 		bias.columns[2] = Vector4(0, 0, 0.5, 0);
 		bias.columns[3] = Vector4(0.5, 0.5, 0.5, 1);
 		Projection full = bias * shadow_projview * Projection(p_view.affine_inverse());
-		for (int row = 0; row < 3; row++) {
+		for (int row = 0; row < 4; row++) {
 			m.r[row].x = full.columns[0][row];
 			m.r[row].y = full.columns[1][row];
 			m.r[row].z = full.columns[2][row];
 			m.r[row].w = full.columns[3][row];
 		}
+	} else {
+		m.r[3].w = 1.0f; // Keep the divide finite.
 	}
-	C3D_FVUnifMtx3x4(GPU_VERTEX_SHADER, r->scene_uniforms.shadow_mtx, &m);
+	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.shadow_mtx, &m);
 }
 
 void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
@@ -897,7 +1014,7 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 	// hardware; Azahar tolerates it). Unused units are simply not sampled.
 	if (shadow_active) {
 		C3D_TexBind(0, &shadow_tex);
-		C3D_TexShadowParams(false, (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/bias"));
+		C3D_TexShadowParams(shadow_perspective, (float)GLOBAL_GET_CACHED(float, "rendering/3ds/shadows/bias"));
 	}
 
 	for (int eye = 0; eye < eyes; eye++) {
@@ -927,7 +1044,7 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 		_setup_fog(p_environment, proj);
 		if (draw_sky) {
 			Color sky_amb;
-			if (_draw_sky(p_environment, eye_view, eye_proj, sky_amb) && ambient_from_sky) {
+			if (_draw_sky(p_environment, eye_view, eye_proj, p_lights, sky_amb) && ambient_from_sky) {
 				ambient = sky_amb * environment_get_ambient_light_energy(p_environment);
 			}
 		}

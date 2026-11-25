@@ -171,10 +171,12 @@ renderer maps Godot's built-in materials onto it:
   (Godot's distance falloff), plus the environment's ambient light.
 - `Environment` background: clear color, color, or sky (ProceduralSkyMaterial,
   PanoramaSkyMaterial, PhysicalSkyMaterial approximated; ambient "Sky"
-  takes its color), and fog (exponential and depth modes) on the PICA fog
+  takes its color; directional lights draw a sun disc in procedural and
+  physical skies), and fog (exponential and depth modes) on the PICA fog
   unit.
 - Mipmaps for textures imported with mipmaps (the 3D default).
-- Shadows from the first `DirectionalLight3D` with shadows enabled: an
+- Shadows from the first `DirectionalLight3D` with shadows enabled (else the
+  first shadowed `SpotLight3D`, with a perspective map of its cone): an
   orthographic shadow map (`rendering/3ds/shadows/size`, default 512) around
   the camera out to `rendering/3ds/shadows/max_distance` (default 20), read
   by the PICA200 lighting unit (only that light is darkened, as in Godot).
