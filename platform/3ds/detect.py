@@ -61,7 +61,7 @@ def get_opts():
 
 
 def get_doc_classes():
-    return []
+    return ["Nintendo3DS", "EditorExportPlatform3DS"]
 
 
 def get_doc_path():

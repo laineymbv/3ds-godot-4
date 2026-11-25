@@ -34,6 +34,7 @@
 #include "core/variant/dictionary.h"
 
 class CanvasItem;
+class Material;
 
 // Script access to 3DS-specific features. Exists in every build so scripts
 // type-check in the editor; off-device it returns neutral values.
@@ -66,6 +67,8 @@ public:
 	// small (about -6..+6): large shifts are hard to look at.
 	void set_depth(CanvasItem *p_item, float p_depth, bool p_recursive = true);
 	float get_depth(CanvasItem *p_item) const;
+	// True when p_material is the material set_depth() creates (safe to change).
+	static bool is_depth_material(const Ref<Material> &p_material);
 
 	// Writes top_left.png, top_right.png and bottom.png (what the screens
 	// show) into p_dir after the current frame.

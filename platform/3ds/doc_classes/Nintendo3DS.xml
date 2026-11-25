@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="Nintendo3DS" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Access to 3DS hardware: the 3D slider, the stereo settings, 2D depth, and screen capture.
+	</brief_description>
+	<description>
+		[Nintendo3DS] is available as the singleton [code]Nintendo3DS[/code] on the 3DS. The stock editor doesn't know the class, so reach it through [method Engine.get_singleton] and check [method Engine.has_singleton] first:
+		[codeblock]
+		var n3ds = Engine.get_singleton("Nintendo3DS") if Engine.has_singleton("Nintendo3DS") else null
+		[/codeblock]
+		In the fork's editor the class exists too and returns neutral values for the hardware queries, but [method set_depth] and [method get_depth] work there, so the depth you set is saved with the scene.
+		[b]Stereo 3D:[/b] every [Camera3D] is rendered once per eye whenever the 3D slider is up. The eye separation and convergence come from the project settings [code]rendering/3ds/stereo/max_separation[/code] (default 0.12) and [code]rendering/3ds/stereo/convergence[/code] (default 3.0). [method set_stereo_separation] and [method set_stereo_convergence] override them for the current scene; a negative value restores the project settings.
+		[b]2D depth:[/b] [method set_depth] moves a [CanvasItem] in front of or behind the screen plane. See [method set_depth] for the details.
+		[b]Hardware:[/b] [method get_3d_slider] gives the slider position from 0.0 (off) to 1.0. [method is_new_3ds] tells you which console is running, so a game can scale effects down on the slower original. [method get_battery_level] gives 0 to 5, and [method is_charging] says whether the console is on charge.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_3d_slider" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the 3D slider position, from [code]0.0[/code] (off, one image) to [code]1.0[/code] (full depth). Always [code]0.0[/code] outside the 3DS.
+			</description>
+		</method>
+		<method name="get_audio_stats" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns a dictionary about the DSP audio driver: [code]active[/code] (bool), [code]buffers_played[/code] (int), and [code]last_peak[/code] (float, the loudest sample of the last buffer). Use it to check that sound is playing.
+			</description>
+		</method>
+		<method name="get_battery_level" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the battery level from [code]0[/code] (empty) to [code]5[/code] (full). Returns [code]0[/code] outside the 3DS.
+			</description>
+		</method>
+		<method name="get_depth" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="item" type="CanvasItem" />
+			<description>
+				Returns the depth set on [param item] with [method set_depth]. An item that uses its parent's material reports the parent's depth. Returns [code]0.0[/code] for an item with no depth.
+			</description>
+		</method>
+		<method name="get_stereo_convergence" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the convergence in use: the value set with [method set_stereo_convergence], or the project setting.
+			</description>
+		</method>
+		<method name="get_stereo_separation" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the eye separation in use: the value set with [method set_stereo_separation], or the project setting.
+			</description>
+		</method>
+		<method name="is_charging" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while the console is charging. Returns [code]false[/code] outside the 3DS.
+			</description>
+		</method>
+		<method name="is_new_3ds" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] on a New Nintendo 3DS or 2DS XL, and [code]false[/code] on the original 3DS or 2DS.
+			</description>
+		</method>
+		<method name="save_screens">
+			<return type="void" />
+			<param index="0" name="dir" type="String" />
+			<description>
+				Saves what the screens show after the current frame, as [code]top_left.png[/code], [code]top_right.png[/code] (the two eyes) and [code]bottom.png[/code], into [param dir]. Use it with [code]OS.get_user_data_dir()[/code] to check the result of a change without a camera.
+			</description>
+		</method>
+		<method name="set_depth">
+			<return type="void" />
+			<param index="0" name="item" type="CanvasItem" />
+			<param index="1" name="depth" type="float" />
+			<param index="2" name="recursive" type="bool" default="true" />
+			<description>
+				Places [param item] in front of ([code]depth[/code] &gt; 0) or behind ([code]depth[/code] &lt; 0) the screen. The number is in pixels of disparity at full 3D slider, and the slider scales it. A depth of [code]0.0[/code] puts the item on the screen plane, where all 2D items sit by default.
+				Each eye sees the item shifted sideways by half the depth times the slider, rounded to whole pixels so text and sprites stay sharp. The clip rectangle of a clipped item moves with it. Keep depths between about [code]-6[/code] and [code]6[/code]; larger shifts are hard to look at.
+				[b]How it works:[/b] the item gets a [ShaderMaterial] with a [code]stereo_depth[/code] parameter. If [param recursive] is [code]true[/code], descendants without a material of their own use that material and share the depth. A descendant with its own material keeps it and sits at depth [code]0.0[/code], unless you call [method set_depth] on it.
+				[b]Warning:[/b] if the item already has a different material, this replaces it. The editor's Stereo Depth row won't do that: it turns read-only in that case, so put a [code]stereo_depth[/code] uniform on that material yourself.
+			</description>
+		</method>
+		<method name="set_stereo_convergence">
+			<return type="void" />
+			<param index="0" name="convergence" type="float" />
+			<description>
+				Sets the convergence (the distance from the camera with no parallax) for the current scene. Pass a negative value to go back to [code]rendering/3ds/stereo/convergence[/code].
+			</description>
+		</method>
+		<method name="set_stereo_separation">
+			<return type="void" />
+			<param index="0" name="max_separation" type="float" />
+			<description>
+				Sets the eye separation at full 3D slider, in world units, for the current scene. Pass a negative value to go back to [code]rendering/3ds/stereo/max_separation[/code].
+			</description>
+		</method>
+	</methods>
+</class>

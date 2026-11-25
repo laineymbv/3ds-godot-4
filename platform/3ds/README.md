@@ -164,6 +164,13 @@ n3ds.set_depth($Hud, 3.0)           # the HUD and everything under it
 n3ds.set_depth($Sky, -5.0, false)   # this item only
 ```
 
+In the editor, select any `CanvasItem` and use the **Stereo Depth** row in the
+Inspector (slider in pixels, undoable). It sets the same value as
+`set_depth`, so it's saved with the scene. The row is read-only when the item
+inherits its parent's material, or has a material that isn't the depth one.
+Full reference: the `Nintendo3DS` and `EditorExportPlatform3DS` class pages in
+the editor's Help (source: `doc_classes/`).
+
 `set_depth` gives the item a `ShaderMaterial` with a `stereo_depth` parameter;
 descendants without a material of their own use it too (`use_parent_material`).
 A descendant with its own material keeps it and sits at depth 0, unless you
@@ -298,6 +305,11 @@ in the procedural sky, reflection probes and other post-processing. Textures lar
   uses the time the main thread waits for vsync. Audio mixes on its own
   thread (core 2 on the New 3DS).
 - No GDExtension (no dynamic loading on the 3DS).
+
+## Class reference
+
+The editor's Help has entries for the classes this platform adds: `Nintendo3DS`
+and `EditorExportPlatform3DS`. Their sources are in `doc_classes/`.
 
 ## Porting notes
 

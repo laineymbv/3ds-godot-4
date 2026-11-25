@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="EditorExportPlatform3DS" inherits="EditorExportPlatform" api_type="editor" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		The Nintendo 3DS export platform (the editor's Project > Export > Nintendo 3DS).
+	</brief_description>
+	<description>
+		Exports a project for the 3DS as a [code].3dsx[/code] (run from the Homebrew Launcher) or a [code].cia[/code] (installed with FBI). A [code].3dsx[/code] is written directly: the export template, a title and icon, and a RomFS with the project's [code].pck[/code]. A [code].cia[/code] also needs makerom and bannertool.
+		Preset options: [code]application/title[/code], [code]application/description[/code], [code]application/author[/code], [code]application/icon[/code] (defaults to the project icon), [code]cia/banner[/code], [code]cia/banner_audio[/code]. Editor Settings under [code]export/3ds[/code] hold the paths to [code]makerom[/code], [code]bannertool[/code] and [code]3dslink[/code], and the console address for "Run on 3DS".
+		Textures imported as VRAM Compressed are exported as S3TC and decompressed on the 3DS. Lossless textures are stored as WebP, which the 3DS template reads too.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+	</methods>
+</class>

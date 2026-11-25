@@ -115,6 +115,11 @@ float Nintendo3DS::get_depth(CanvasItem *p_item) const {
 	return mat->get_shader_parameter("stereo_depth");
 }
 
+bool Nintendo3DS::is_depth_material(const Ref<Material> &p_material) {
+	Ref<ShaderMaterial> sm = p_material;
+	return sm.is_valid() && sm->get_shader() == _depth_shader();
+}
+
 float Nintendo3DS::get_3d_slider() const {
 #ifdef THREEDS_ENABLED
 	return osGet3DSliderState();
