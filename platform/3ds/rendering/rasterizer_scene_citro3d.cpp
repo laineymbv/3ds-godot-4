@@ -498,7 +498,7 @@ void RasterizerSceneCitro3D::_fill_draw_lists(const CameraData *p_camera_data, c
 	_prepare_draw_items(transparent_list, true);
 	frame_stats.objects = opaque_list.size() + transparent_list.size();
 
-	// Opaque items sort by GPU state so neighbours share it and
+	// Opaque items sort by GPU state so neighbors share it and
 	// _apply_material() can skip it; depth only breaks ties. The PICA200
 	// depth test runs after lighting and TEV and the port does not enable
 	// the early depth test, so front-to-back order saved no fragment work.
