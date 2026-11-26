@@ -380,10 +380,7 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 		if (material.is_valid()) {
 			Material *m = ms->get_material(material);
 			if (m) {
-				const Variant *depth = m->params.getptr(StringName("stereo_depth"));
-				if (depth) {
-					item_depth = *depth;
-				}
+				item_depth = m->stereo_depth;
 			}
 			Shader *s = m ? ms->get_shader(m->shader) : nullptr;
 			if (s) {

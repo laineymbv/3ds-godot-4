@@ -137,13 +137,13 @@ bool RasterizerSceneCitro3D::free(RID p_rid) {
 	return RasterizerSceneDummy::free(p_rid);
 }
 
-static Color _sky_param_color(const Material *p_m, const char *p_name, const Color &p_default) {
-	const Variant *v = p_m->params.getptr(StringName(p_name));
+static Color _sky_param_color(const Material *p_m, const StringName &p_name, const Color &p_default) {
+	const Variant *v = p_m->params.getptr(p_name);
 	return (v && v->get_type() == Variant::COLOR) ? Color(*v) : p_default;
 }
 
-static float _sky_param_float(const Material *p_m, const char *p_name, float p_default) {
-	const Variant *v = p_m->params.getptr(StringName(p_name));
+static float _sky_param_float(const Material *p_m, const StringName &p_name, float p_default) {
+	const Variant *v = p_m->params.getptr(p_name);
 	return (v && (v->get_type() == Variant::FLOAT || v->get_type() == Variant::INT)) ? float(*v) : p_default;
 }
 
@@ -286,27 +286,27 @@ bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_v
 	// Colors: ProceduralSkyMaterial's gradient, or PhysicalSkyMaterial's
 	// rayleigh/ground colors, or white under a panorama.
 	Texture *pano = nullptr;
-	const Variant *pv = m->params.getptr(StringName("source_panorama"));
+	const Variant *pv = m->params.getptr(SNAME("source_panorama"));
 	if (pv && pv->get_type() == Variant::RID) {
 		pano = ts->resolve_texture(*pv);
 	}
-	float exposure = _sky_param_float(m, "exposure", 1.0f);
+	float exposure = _sky_param_float(m, SNAME("exposure"), 1.0f);
 	Color top, horizon, ground_h, ground_b;
 	float inv_sky_curve = 0.6f / 0.15f, inv_ground_curve = 0.6f / 0.02f;
 	if (pano) {
 		top = horizon = ground_h = ground_b = Color(exposure, exposure, exposure);
-	} else if (m->params.has(StringName("sky_top_color"))) {
-		top = _sky_param_color(m, "sky_top_color", Color(0.385, 0.454, 0.55)) * exposure;
-		horizon = _sky_param_color(m, "sky_horizon_color", Color(0.646, 0.656, 0.67)) * exposure;
-		ground_b = _sky_param_color(m, "ground_bottom_color", Color(0.2, 0.169, 0.133)) * exposure;
-		ground_h = _sky_param_color(m, "ground_horizon_color", Color(0.646, 0.656, 0.67)) * exposure;
-		inv_sky_curve = _sky_param_float(m, "inv_sky_curve", inv_sky_curve);
-		inv_ground_curve = _sky_param_float(m, "inv_ground_curve", inv_ground_curve);
-	} else if (m->params.has(StringName("rayleigh_color"))) {
-		Color ray = _sky_param_color(m, "rayleigh_color", Color(0.3, 0.405, 0.6));
+	} else if (m->params.has(SNAME("sky_top_color"))) {
+		top = _sky_param_color(m, SNAME("sky_top_color"), Color(0.385, 0.454, 0.55)) * exposure;
+		horizon = _sky_param_color(m, SNAME("sky_horizon_color"), Color(0.646, 0.656, 0.67)) * exposure;
+		ground_b = _sky_param_color(m, SNAME("ground_bottom_color"), Color(0.2, 0.169, 0.133)) * exposure;
+		ground_h = _sky_param_color(m, SNAME("ground_horizon_color"), Color(0.646, 0.656, 0.67)) * exposure;
+		inv_sky_curve = _sky_param_float(m, SNAME("inv_sky_curve"), inv_sky_curve);
+		inv_ground_curve = _sky_param_float(m, SNAME("inv_ground_curve"), inv_ground_curve);
+	} else if (m->params.has(SNAME("rayleigh_color"))) {
+		Color ray = _sky_param_color(m, SNAME("rayleigh_color"), Color(0.3, 0.405, 0.6));
 		top = ray * exposure;
 		horizon = ray.lerp(Color(1, 1, 1), 0.55f) * exposure;
-		ground_b = _sky_param_color(m, "ground_color", Color(0.1, 0.07, 0.034)) * exposure;
+		ground_b = _sky_param_color(m, SNAME("ground_color"), Color(0.1, 0.07, 0.034)) * exposure;
 		ground_h = ground_b.lerp(horizon, 0.5f);
 	} else {
 		return false; // Custom sky shader: background color instead.
@@ -382,7 +382,7 @@ bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_v
 	C3D_DrawElements(GPU_TRIANGLES, sky_index_count, C3D_UNSIGNED_SHORT, sky_indices);
 	if (!pano) {
 		// Sun discs for directional lights (procedural and physical skies).
-		float angle_max = Math::acos(CLAMP(_sky_param_float(m, "sun_angle_max", Math::cos(Math::deg_to_rad(30.0f))), -1.0f, 1.0f));
+		float angle_max = Math::acos(CLAMP(_sky_param_float(m, SNAME("sun_angle_max"), Math::cos(Math::deg_to_rad(30.0f))), -1.0f, 1.0f));
 		_draw_sun_disks(p_lights, p_view, radius, angle_max * 0.35f, exposure);
 	}
 	return true;
@@ -438,7 +438,7 @@ void RasterizerSceneCitro3D::_add_mesh(GeometryInstanceCitro3D *p_gi, RID p_mesh
 		item.vertices = (mi && s < mi->vertices.size() && mi->vertices[s]) ? mi->vertices[s] : surf.vertices;
 		item.model = p_model;
 		item.depth = p_depth;
-		mat->get_state(material, item.material);
+		item.material = mat->get_state(material);
 		// Per-instance COLOR only shows where the material uses vertex color.
 		if (p_color != Color(1, 1, 1, 1) && item.material.shader && item.material.shader->info.uses_vertex_color) {
 			item.material.albedo *= p_color;
