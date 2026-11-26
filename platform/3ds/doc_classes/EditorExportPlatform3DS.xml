@@ -6,7 +6,7 @@
 	<description>
 		Exports a project for the 3DS as a [code].3dsx[/code] (run from the Homebrew Launcher) or a [code].cia[/code] (installed with FBI). A [code].3dsx[/code] is written directly: the export template, a title and icon, and a RomFS with the project's [code].pck[/code]. A [code].cia[/code] also needs makerom and bannertool.
 		Preset options: [code]application/title[/code], [code]application/description[/code], [code]application/author[/code], [code]application/icon[/code] (defaults to the project icon), [code]cia/banner[/code], [code]cia/banner_audio[/code]. Editor Settings under [code]export/3ds[/code] hold the paths to [code]makerom[/code], [code]bannertool[/code] and [code]3dslink[/code], and the console address for "Run on 3DS".
-		Textures imported as VRAM Compressed are exported as S3TC and decompressed on the 3DS. Lossless textures are stored as WebP, which the 3DS template reads too.
+		Textures imported as VRAM Compressed are re-encoded as ETC1 (ETC1A4 with alpha), which the 3DS samples without decompressing; [code]textures/etc1[/code] picks which textures this applies to, and [code]Disabled[/code] exports S3TC, decompressed on the 3DS. Lossless textures are stored as WebP, which the 3DS template reads too.
 	</description>
 	<tutorials>
 	</tutorials>

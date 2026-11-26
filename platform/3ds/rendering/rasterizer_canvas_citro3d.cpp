@@ -204,6 +204,7 @@ void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt, int p_eye, int p
 			if (b.texture != bound_tex) {
 				C3D_TexBind(0, t);
 				bound_tex = b.texture;
+				TextureStorage::get_singleton()->mark_used(b.texture);
 			}
 		}
 		if (b.light_texture) {

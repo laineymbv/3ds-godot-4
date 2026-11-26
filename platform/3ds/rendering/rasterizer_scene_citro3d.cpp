@@ -661,6 +661,7 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 		C3D_TexSetFilter(&tex->tex, f, f);
 		C3D_TexSetWrap(&tex->tex, w, w);
 		C3D_TexBind(1, &tex->tex); // Unit 0 is reserved for the shadow map.
+		ts->mark_used(tex);
 	}
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, uv_scale.x, uv_scale.y, uv_offset.x, uv_offset.y);
 	if (use_vertex_color) {

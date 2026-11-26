@@ -48,6 +48,12 @@ struct Texture {
 	bool allocated = false;
 	bool filter = true;
 	bool mipmaps = false;
+	bool in_vram = false; // Moved there by TextureStorage once it proved hot.
+
+	RID self;
+	uint32_t updates = 0; // Uploads so far; textures updated often stay in linear memory.
+	uint32_t used_frame = 0;
+	uint32_t frame_uses = 0; // Binds during used_frame.
 
 	RID render_target; // Set when this is a viewport texture.
 	RID proxy_to; // Set for proxies (AnimatedTexture frames, etc.).
@@ -109,7 +115,19 @@ class TextureStorage : public RendererDummy::TextureStorage {
 	LocalVector<DeadTarget> dead_targets;
 	LocalVector<C3D_Tex> dead_textures;
 
+	// Hot textures move from linear FCRAM to VRAM between frames, most bound
+	// first, while VRAM keeps rendering/3ds/textures/vram_reserve_kb free.
+	bool vram_textures = true;
+	uint32_t vram_reserve = 0;
+	uint32_t frame_index = 1;
+	LocalVector<RID> hot_textures; // Bound this frame and still in linear memory.
+	void _promote_hot_textures();
+	bool _texture_move_to_vram(Texture *p_tex);
+
 	void _texture_upload(Texture *p_tex, const Ref<Image> &p_image);
+	bool _texture_upload_etc(Texture *p_tex, const Ref<Image> &p_image);
+	bool _texture_alloc(Texture *p_tex, int p_width, int p_height, GPU_TEXCOLOR p_format, bool p_mipmaps);
+	void _texture_finish(Texture *p_tex);
 	void _texture_release(Texture *p_tex);
 	void _render_target_allocate(RenderTarget *p_rt);
 	void _render_target_release(RenderTarget *p_rt);
@@ -124,6 +142,18 @@ public:
 
 	// Resolves canvas textures and proxies to a drawable texture.
 	Texture *resolve_texture(RID p_rid, Color *r_modulate = nullptr) const;
+
+	// Call when binding a texture for a draw: counts how hot it is.
+	void mark_used(Texture *p_tex) {
+		if (p_tex->used_frame != frame_index) {
+			p_tex->used_frame = frame_index;
+			p_tex->frame_uses = 0;
+			if (vram_textures && !p_tex->in_vram && p_tex->render_target.is_null() && p_tex->self.is_valid()) {
+				hot_textures.push_back(p_tex->self);
+			}
+		}
+		p_tex->frame_uses++;
+	}
 
 	// Called by the compositor around C3D_FrameBegin/End.
 	void frame_prepare(); // Before C3D_FrameBegin: deferred (re)allocations.

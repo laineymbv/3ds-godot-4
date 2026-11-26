@@ -30,6 +30,7 @@
 
 #include "export.h"
 
+#include "etc1_export.h"
 #include "export_plugin.h"
 #include "stereo_depth_inspector.h"
 
@@ -42,6 +43,7 @@ void register_3ds_exporter_types() {
 	GDREGISTER_VIRTUAL_CLASS(EditorExportPlatform3DS);
 	GDREGISTER_CLASS(EditorPropertyStereoDepth);
 	GDREGISTER_CLASS(EditorInspectorPluginStereoDepth);
+	GDREGISTER_CLASS(EditorExportPlugin3DSTextures);
 }
 
 void register_3ds_exporter() {
@@ -57,6 +59,10 @@ void register_3ds_exporter() {
 	Ref<EditorExportPlatform3DS> platform;
 	platform.instantiate();
 	EditorExport::get_singleton()->add_export_platform(platform);
+
+	Ref<EditorExportPlugin3DSTextures> etc1;
+	etc1.instantiate();
+	EditorExport::get_singleton()->add_export_plugin(etc1);
 
 	Ref<EditorInspectorPluginStereoDepth> stereo_depth;
 	stereo_depth.instantiate();
