@@ -303,10 +303,11 @@ void RasterizerCanvasCitro3D::_add_mesh(RID p_mesh, const Transform2D &p_xform, 
 			Color col[3];
 			for (int k = 0; k < 3; k++) {
 				int idx = s.indices ? s.indices[i + k] : i + k;
-				const Vertex &v = s.vertices[idx];
-				pos[k] = p_xform.xform(Vector2(v.position[0], v.position[1]));
-				uv[k] = _uv(p_tex, Vector2(v.uv[0], v.uv[1]));
-				col[k] = Color(v.color[0] / 255.0f, v.color[1] / 255.0f, v.color[2] / 255.0f, v.color[3] / 255.0f) * p_modulate;
+				const PackedVertex &v = s.vertices[idx];
+				Vector3 p = s.quant.position(v);
+				pos[k] = p_xform.xform(Vector2(p.x, p.y));
+				uv[k] = _uv(p_tex, s.quant.uv(v));
+				col[k] = VertexQuant::color(v) * p_modulate;
 			}
 			_add_triangle(pos, uv, col);
 		}

@@ -96,19 +96,37 @@ void MeshStorage::_update_aabb(Mesh *p_mesh) {
 	p_mesh->aabb = aabb;
 }
 
-void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::SurfaceData &p_surface) {
-	Mesh *m = mesh_owner.get_or_null(p_mesh);
-	ERR_FAIL_NULL(m);
+// Quantizes p_value into [-32767, 32767] around the middle of [p_min, p_max];
+// returns the scale/offset that turn it back into a float.
+static inline void _quant_range(float p_min, float p_max, float &r_scale, float &r_offset, float &r_inv) {
+	float half = (p_max - p_min) * 0.5f;
+	r_offset = (p_min + p_max) * 0.5f;
+	r_scale = half / 32767.0f;
+	r_inv = half > 0.0f ? 32767.0f / half : 0.0f;
+}
 
-	Surface s;
-	s.primitive = p_surface.primitive;
-	s.material = p_surface.material;
-	s.aabb = p_surface.aabb;
-	s.data = p_surface;
+static inline int16_t _quant(float p_value, float p_offset, float p_inv) {
+	return (int16_t)CLAMP(Math::round((p_value - p_offset) * p_inv), -32767.0f, 32767.0f);
+}
+
+static inline int8_t _quant_normal(float p_value) {
+	return (int8_t)CLAMP(Math::round(p_value * 127.0f), -127.0f, 127.0f);
+}
+
+bool MeshStorage::_surface_create(const RenderingServerTypes::SurfaceData &p_data, bool p_keep_data, Surface &r_surface) {
+	Surface &s = r_surface;
+	s.primitive = p_data.primitive;
+	s.material = p_data.material;
+	s.aabb = p_data.aabb;
+	s.format = p_data.format;
+	s.has_data = p_keep_data || (p_data.format & RSE::ARRAY_FLAG_USE_DYNAMIC_UPDATE) || !p_data.blend_shape_data.is_empty();
+	if (s.has_data) {
+		s.data = p_data;
+	}
 
 	// Decode Godot's packed vertex streams with the server's own helper, then
 	// interleave them the way the PICA200 attribute loader reads them.
-	Array arrays = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(p_surface);
+	Array arrays = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(p_data);
 	PackedVector3Array positions;
 	if (arrays[RSE::ARRAY_VERTEX].get_type() == Variant::PACKED_VECTOR2_ARRAY) {
 		// 2D meshes (MeshInstance2D, CPUParticles2D): z = 0.
@@ -133,53 +151,178 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	}
 
 	int vc = positions.size();
+	if (indices.size() > 0 && vc > 65536) {
+		ERR_PRINT("3DS: meshes are limited to 65536 vertices per surface; surface skipped.");
+		return false;
+	}
+
 	if (vc > 0) {
-		s.vertices = (Vertex *)linearAlloc(sizeof(Vertex) * vc);
-		ERR_FAIL_NULL_MSG(s.vertices, "3DS: out of linear memory for mesh vertices.");
+		s.vertices = (PackedVertex *)linearAlloc(sizeof(PackedVertex) * vc);
+		ERR_FAIL_NULL_V_MSG(s.vertices, false, "3DS: out of linear memory for mesh vertices.");
 		s.vertex_count = vc;
 		s.has_color = colors.size() == vc;
 		bool has_n = normals.size() == vc;
 		bool has_uv = uvs.size() == vc;
+
+		// Bounds of this surface's own data (not p_data.aabb, which can be a
+		// custom or skinned AABB), so the 16 bits cover only what is there.
+		Vector3 pmin = positions[0];
+		Vector3 pmax = pmin;
+		for (int i = 1; i < vc; i++) {
+			pmin = pmin.min(positions[i]);
+			pmax = pmax.max(positions[i]);
+		}
+		Vector2 tmin, tmax;
+		if (has_uv) {
+			tmin = uvs[0];
+			tmax = tmin;
+			for (int i = 1; i < vc; i++) {
+				tmin = tmin.min(uvs[i]);
+				tmax = tmax.max(uvs[i]);
+			}
+		}
+		float pinv[3], tinv[2];
+		for (int k = 0; k < 3; k++) {
+			_quant_range(pmin[k], pmax[k], s.quant.pos_scale[k], s.quant.pos_offset[k], pinv[k]);
+		}
+		for (int k = 0; k < 2; k++) {
+			_quant_range(tmin[k], tmax[k], s.quant.uv_scale[k], s.quant.uv_offset[k], tinv[k]);
+		}
+
 		for (int i = 0; i < vc; i++) {
-			Vertex &v = s.vertices[i];
+			PackedVertex &v = s.vertices[i];
 			const Vector3 &p = positions[i];
-			v.position[0] = p.x;
-			v.position[1] = p.y;
-			v.position[2] = p.z;
+			for (int k = 0; k < 3; k++) {
+				v.position[k] = _quant(p[k], s.quant.pos_offset[k], pinv[k]);
+			}
 			Vector3 n = has_n ? normals[i] : Vector3(0, 1, 0);
-			v.normal[0] = n.x;
-			v.normal[1] = n.y;
-			v.normal[2] = n.z;
+			v.normal[0] = _quant_normal(n.x);
+			v.normal[1] = _quant_normal(n.y);
+			v.normal[2] = _quant_normal(n.z);
 			Vector2 uv = has_uv ? uvs[i] : Vector2();
-			v.uv[0] = uv.x;
-			v.uv[1] = uv.y;
+			v.uv[0] = _quant(uv.x, s.quant.uv_offset[0], tinv[0]);
+			v.uv[1] = _quant(uv.y, s.quant.uv_offset[1], tinv[1]);
 			Color c = s.has_color ? colors[i] : Color(1, 1, 1, 1);
 			v.color[0] = (uint8_t)CLAMP(c.r * 255.0f, 0.0f, 255.0f);
 			v.color[1] = (uint8_t)CLAMP(c.g * 255.0f, 0.0f, 255.0f);
 			v.color[2] = (uint8_t)CLAMP(c.b * 255.0f, 0.0f, 255.0f);
 			v.color[3] = (uint8_t)CLAMP(c.a * 255.0f, 0.0f, 255.0f);
+			v.pad[0] = v.pad[1] = v.pad[2] = 0;
 		}
-		GSPGPU_FlushDataCache(s.vertices, sizeof(Vertex) * vc);
+		GSPGPU_FlushDataCache(s.vertices, sizeof(PackedVertex) * vc);
 	}
 
 	if (indices.size() > 0) {
-		if (vc > 65536) {
-			ERR_PRINT("3DS: meshes are limited to 65536 vertices per surface; surface skipped.");
-			_surface_release(s);
-			return;
-		}
 		s.index_count = indices.size();
 		s.indices = (uint16_t *)linearAlloc(sizeof(uint16_t) * s.index_count);
-		ERR_FAIL_NULL_MSG(s.indices, "3DS: out of linear memory for mesh indices.");
+		if (!s.indices) {
+			_surface_release(s);
+			ERR_FAIL_V_MSG(false, "3DS: out of linear memory for mesh indices.");
+		}
 		for (int i = 0; i < s.index_count; i++) {
 			s.indices[i] = (uint16_t)indices[i];
 		}
 		GSPGPU_FlushDataCache(s.indices, sizeof(uint16_t) * s.index_count);
 	}
+	return true;
+}
 
+void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::SurfaceData &p_surface) {
+	Mesh *m = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(m);
+
+	Surface s;
+	if (!_surface_create(p_surface, false, s)) {
+		return;
+	}
 	m->surfaces.push_back(s);
 	_update_aabb(m);
 	m->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MESH);
+}
+
+RenderingServerTypes::SurfaceData MeshStorage::_surface_rebuild_data(const Surface &p_surface) const {
+	if (p_surface.has_data) {
+		RenderingServerTypes::SurfaceData sd = p_surface.data;
+		sd.material = p_surface.material;
+		return sd;
+	}
+
+	// Rebuild Godot's streams from the packed copy. Lossy: positions and UVs
+	// come back at 16-bit precision, normals at 8-bit; tangents are Godot's
+	// default, UV2 is zero, and custom arrays, LODs and bone AABBs are gone.
+	const Surface &s = p_surface;
+	const uint64_t f = s.format;
+	const int vc = s.vertex_count;
+	Array arrays;
+	arrays.resize(RSE::ARRAY_MAX);
+	if (f & RSE::ARRAY_FLAG_USE_2D_VERTICES) {
+		PackedVector2Array pos;
+		pos.resize(vc);
+		for (int i = 0; i < vc; i++) {
+			Vector3 p = s.quant.position(s.vertices[i]);
+			pos.write[i] = Vector2(p.x, p.y);
+		}
+		arrays[RSE::ARRAY_VERTEX] = pos;
+	} else {
+		PackedVector3Array pos;
+		pos.resize(vc);
+		for (int i = 0; i < vc; i++) {
+			pos.write[i] = s.quant.position(s.vertices[i]);
+		}
+		arrays[RSE::ARRAY_VERTEX] = pos;
+	}
+	if (f & RSE::ARRAY_FORMAT_NORMAL) {
+		PackedVector3Array nrm;
+		nrm.resize(vc);
+		for (int i = 0; i < vc; i++) {
+			nrm.write[i] = VertexQuant::normal(s.vertices[i]).normalized();
+		}
+		arrays[RSE::ARRAY_NORMAL] = nrm;
+	}
+	if (f & RSE::ARRAY_FORMAT_COLOR) {
+		PackedColorArray col;
+		col.resize(vc);
+		for (int i = 0; i < vc; i++) {
+			col.write[i] = VertexQuant::color(s.vertices[i]);
+		}
+		arrays[RSE::ARRAY_COLOR] = col;
+	}
+	if (f & RSE::ARRAY_FORMAT_TEX_UV) {
+		PackedVector2Array uv;
+		uv.resize(vc);
+		for (int i = 0; i < vc; i++) {
+			uv.write[i] = s.quant.uv(s.vertices[i]);
+		}
+		arrays[RSE::ARRAY_TEX_UV] = uv;
+	}
+	if (f & RSE::ARRAY_FORMAT_TEX_UV2) {
+		PackedVector2Array uv2;
+		uv2.resize(vc);
+		uv2.fill(Vector2());
+		arrays[RSE::ARRAY_TEX_UV2] = uv2;
+	}
+	if ((f & RSE::ARRAY_FORMAT_BONES) && s.bones_per_vertex > 0) {
+		arrays[RSE::ARRAY_BONES] = s.bones;
+		arrays[RSE::ARRAY_WEIGHTS] = s.weights;
+	}
+	if (s.indices) {
+		PackedInt32Array idx;
+		idx.resize(s.index_count);
+		for (int i = 0; i < s.index_count; i++) {
+			idx.write[i] = s.indices[i];
+		}
+		arrays[RSE::ARRAY_INDEX] = idx;
+	}
+
+	RenderingServerTypes::SurfaceData sd;
+	uint64_t flags = f & ~((1ULL << RSE::ARRAY_MAX) - 1ULL);
+	if (vc == 0 || RenderingServer::get_singleton()->mesh_create_surface_data_from_arrays(&sd, s.primitive, arrays, Array(), Dictionary(), flags) != OK) {
+		sd = RenderingServerTypes::SurfaceData();
+		sd.primitive = s.primitive;
+		sd.aabb = s.aabb;
+	}
+	sd.material = s.material;
+	return sd;
 }
 
 int MeshStorage::mesh_get_blend_shape_count(RID p_mesh) const {
@@ -200,38 +343,40 @@ RSE::BlendShapeMode MeshStorage::mesh_get_blend_shape_mode(RID p_mesh) const {
 	return m->blend_shape_mode;
 }
 
-void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+void MeshStorage::_surface_update_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data, bool p_attributes) {
 	// Re-decode the whole surface: simple, and updates are rare at runtime.
 	Mesh *m = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(m);
 	ERR_FAIL_INDEX(p_surface, m->surfaces.size());
-	RenderingServerTypes::SurfaceData sd = m->surfaces[p_surface].data;
-	ERR_FAIL_COND(p_offset + p_data.size() > sd.vertex_data.size());
-	memcpy(sd.vertex_data.ptrw() + p_offset, p_data.ptr(), p_data.size());
-	sd.material = m->surfaces[p_surface].material;
-	_surface_release(m->surfaces.write[p_surface]);
-	m->surfaces.remove_at(p_surface);
-	mesh_add_surface(p_mesh, sd);
-	// mesh_add_surface appends; move it back into place.
-	Surface s = m->surfaces[m->surfaces.size() - 1];
-	m->surfaces.remove_at(m->surfaces.size() - 1);
-	m->surfaces.insert(p_surface, s);
+	Surface &old = m->surfaces.write[p_surface];
+	RenderingServerTypes::SurfaceData sd = _surface_rebuild_data(old);
+	if (!old.has_data) {
+		// First update of a surface that dropped its streams: the rebuilt
+		// layout has to match the caller's, or its offsets point elsewhere.
+		const uint64_t version_bits = RSE::ARRAY_FLAG_FORMAT_VERSION_MASK << RSE::ARRAY_FLAG_FORMAT_VERSION_SHIFT;
+		ERR_FAIL_COND_MSG((sd.format & ~version_bits) != (old.format & ~version_bits), "3DS: can't update this surface's vertices (its format can't be rebuilt; custom arrays?).");
+	}
+	Vector<uint8_t> &stream = p_attributes ? sd.attribute_data : sd.vertex_data;
+	ERR_FAIL_COND(p_offset < 0 || p_offset + p_data.size() > stream.size());
+	memcpy(stream.ptrw() + p_offset, p_data.ptr(), p_data.size());
+
+	// Updated once, likely updated again: keep the streams from now on.
+	Surface s;
+	if (!_surface_create(sd, true, s)) {
+		return;
+	}
+	_surface_release(old);
+	old = s;
+	_update_aabb(m);
+	m->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MESH);
+}
+
+void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+	_surface_update_region(p_mesh, p_surface, p_offset, p_data, false);
 }
 
 void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
-	Mesh *m = mesh_owner.get_or_null(p_mesh);
-	ERR_FAIL_NULL(m);
-	ERR_FAIL_INDEX(p_surface, m->surfaces.size());
-	RenderingServerTypes::SurfaceData sd = m->surfaces[p_surface].data;
-	ERR_FAIL_COND(p_offset + p_data.size() > sd.attribute_data.size());
-	memcpy(sd.attribute_data.ptrw() + p_offset, p_data.ptr(), p_data.size());
-	sd.material = m->surfaces[p_surface].material;
-	_surface_release(m->surfaces.write[p_surface]);
-	m->surfaces.remove_at(p_surface);
-	mesh_add_surface(p_mesh, sd);
-	Surface s = m->surfaces[m->surfaces.size() - 1];
-	m->surfaces.remove_at(m->surfaces.size() - 1);
-	m->surfaces.insert(p_surface, s);
+	_surface_update_region(p_mesh, p_surface, p_offset, p_data, true);
 }
 
 void MeshStorage::mesh_surface_set_material(RID p_mesh, int p_surface, RID p_material) {
@@ -253,9 +398,7 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 	Mesh *m = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(m, RenderingServerTypes::SurfaceData());
 	ERR_FAIL_INDEX_V(p_surface, m->surfaces.size(), RenderingServerTypes::SurfaceData());
-	RenderingServerTypes::SurfaceData sd = m->surfaces[p_surface].data;
-	sd.material = m->surfaces[p_surface].material;
-	return sd;
+	return _surface_rebuild_data(m->surfaces[p_surface]);
 }
 
 int MeshStorage::mesh_get_surface_count(RID p_mesh) const {
@@ -465,9 +608,9 @@ void MeshStorage::_mesh_instance_update(MeshInstance *p_mi) {
 		}
 		const Transform3D *bones = sk ? sk->bones.ptr() : nullptr;
 		for (int v = 0; v < s.vertex_count; v++) {
-			const Vertex &src = s.vertices[v];
-			Vector3 p(src.position[0], src.position[1], src.position[2]);
-			Vector3 n(src.normal[0], src.normal[1], src.normal[2]);
+			const PackedVertex &src = s.vertices[v];
+			Vector3 p = s.quant.position(src);
+			Vector3 n = VertexQuant::normal(src);
 
 			if (shapes) {
 				Vector3 dp, dn;
@@ -510,8 +653,12 @@ void MeshStorage::_mesh_instance_update(MeshInstance *p_mi) {
 				}
 			}
 
+			// Skinned output stays in the float layout: it can move anywhere.
 			Vertex &d = out[v];
-			d = src;
+			Vector2 uv = s.quant.uv(src);
+			d.uv[0] = uv.x;
+			d.uv[1] = uv.y;
+			memcpy(d.color, src.color, 4);
 			d.position[0] = p.x;
 			d.position[1] = p.y;
 			d.position[2] = p.z;

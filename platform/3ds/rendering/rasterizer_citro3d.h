@@ -50,6 +50,7 @@ class MeshStorage;
 class TextureStorage;
 class Utilities;
 struct RenderTarget;
+struct VertexQuant;
 
 // 2D vertex as streamed to the canvas shader.
 struct CanvasVertex {
@@ -93,6 +94,8 @@ class RasterizerCitro3D : public RendererCompositor {
 	shaderProgram_s scene_program;
 	shaderProgram_s canvas_program;
 	int bound_program = -1;
+	int bound_layout = -1; // 0 = float Vertex, 1 = PackedVertex, -1 = other.
+	void _set_mesh_attributes(bool p_packed);
 
 	// Screens: top left eye, top right eye, bottom.
 	C3D_RenderTarget *screen_targets[3] = {};
@@ -132,6 +135,9 @@ public:
 		int color_scale = -1;
 		int color_bias = -1;
 		int shadow_mtx = -1;
+		int pos_scale = -1;
+		int pos_offset = -1;
+		int uv_quant = -1;
 	} scene_uniforms;
 	struct {
 		int projection = -1;
@@ -139,8 +145,14 @@ public:
 	struct {
 		int projection = -1;
 		int model_view = -1;
+		int pos_scale = -1;
+		int pos_offset = -1;
 	} shadow_uniforms;
 	void bind_shadow_program();
+	// Mesh vertex layout for the bound scene or shadow program: packed
+	// (Citro3D::PackedVertex, dequantized with p_quant) or, when p_quant is
+	// null, the float Citro3D::Vertex. Also sets the dequantize uniforms.
+	void set_mesh_vertex_format(const Citro3D::VertexQuant *p_quant);
 
 	void bind_scene_program();
 	void bind_canvas_program();

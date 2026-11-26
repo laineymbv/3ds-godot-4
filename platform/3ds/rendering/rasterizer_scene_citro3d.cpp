@@ -227,6 +227,7 @@ void RasterizerSceneCitro3D::_draw_sun_disks(const PagedArray<RID> &p_lights, co
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
 	C3D_BufInfo *bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
+	r->set_mesh_vertex_format(nullptr);
 	BufInfo_Add(bi, sun_vertices, sizeof(Vertex), 4, 0x3210);
 	for (int i = 0; i < count; i++) {
 		C3D_DrawArrays(GPU_TRIANGLE_STRIP, i * 4, 4);
@@ -378,6 +379,7 @@ bool RasterizerSceneCitro3D::_draw_sky(RID p_environment, const Transform3D &p_v
 
 	C3D_BufInfo *bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
+	r->set_mesh_vertex_format(nullptr);
 	BufInfo_Add(bi, sky_vertices, sizeof(Vertex), 4, 0x3210);
 	C3D_DrawElements(GPU_TRIANGLES, sky_index_count, C3D_UNSIGNED_SHORT, sky_indices);
 	if (!pano) {
@@ -435,7 +437,12 @@ void RasterizerSceneCitro3D::_add_mesh(GeometryInstanceCitro3D *p_gi, RID p_mesh
 		DrawItem item;
 		item.instance = p_gi;
 		item.surface = &surf;
-		item.vertices = (mi && s < mi->vertices.size() && mi->vertices[s]) ? mi->vertices[s] : surf.vertices;
+		if (mi && s < mi->vertices.size() && mi->vertices[s]) {
+			item.vertices = mi->vertices[s];
+		} else {
+			item.vertices = surf.vertices;
+			item.quant = &surf.quant;
+		}
 		item.model = p_model;
 		item.depth = p_depth;
 		item.material = mat->get_state(material);
@@ -781,9 +788,10 @@ void RasterizerSceneCitro3D::_draw_item_geometry(const DrawItem &p_item, const T
 	C3D_Mtx mv;
 	_transform_to_mtx(p_view * p_item.model, &mv);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mv);
+	r->set_mesh_vertex_format(p_item.quant);
 	C3D_BufInfo *bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
-	BufInfo_Add(bi, p_item.vertices, sizeof(Vertex), 4, 0x3210);
+	BufInfo_Add(bi, p_item.vertices, p_item.quant ? sizeof(PackedVertex) : sizeof(Vertex), 4, 0x3210);
 	if (p_item.surface->indices) {
 		C3D_DrawElements(GPU_TRIANGLES, p_item.surface->index_count, C3D_UNSIGNED_SHORT, p_item.surface->indices);
 	} else {
@@ -906,9 +914,10 @@ bool RasterizerSceneCitro3D::_render_shadow_map(const PagedArray<RID> &p_lights,
 		C3D_Mtx mv;
 		_transform_to_mtx(light_view * item.model, &mv);
 		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->shadow_uniforms.model_view, &mv);
+		r->set_mesh_vertex_format(item.quant);
 		C3D_BufInfo *bi = C3D_GetBufInfo();
 		BufInfo_Init(bi);
-		BufInfo_Add(bi, item.vertices, sizeof(Vertex), 4, 0x3210);
+		BufInfo_Add(bi, item.vertices, item.quant ? sizeof(PackedVertex) : sizeof(Vertex), 4, 0x3210);
 		if (item.surface->indices) {
 			C3D_DrawElements(GPU_TRIANGLES, item.surface->index_count, C3D_UNSIGNED_SHORT, item.surface->indices);
 		} else {

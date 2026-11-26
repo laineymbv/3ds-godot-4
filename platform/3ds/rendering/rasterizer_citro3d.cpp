@@ -141,6 +141,9 @@ void RasterizerCitro3D::initialize() {
 	scene_uniforms.color_scale = shaderInstanceGetUniformLocation(scene_program.vertexShader, "colorScale");
 	scene_uniforms.color_bias = shaderInstanceGetUniformLocation(scene_program.vertexShader, "colorBias");
 	scene_uniforms.shadow_mtx = shaderInstanceGetUniformLocation(scene_program.vertexShader, "shadowMtx");
+	scene_uniforms.pos_scale = shaderInstanceGetUniformLocation(scene_program.vertexShader, "posScale");
+	scene_uniforms.pos_offset = shaderInstanceGetUniformLocation(scene_program.vertexShader, "posOffset");
+	scene_uniforms.uv_quant = shaderInstanceGetUniformLocation(scene_program.vertexShader, "uvQuant");
 
 	canvas_dvlb = _load_shader(shader_canvas_shbin, shader_canvas_shbin_size, &canvas_shbin);
 	shaderProgramInit(&canvas_program);
@@ -152,6 +155,8 @@ void RasterizerCitro3D::initialize() {
 	shaderProgramSetVsh(&shadow_program, &shadow_dvlb->DVLE[0]);
 	shadow_uniforms.projection = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "projection");
 	shadow_uniforms.model_view = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "modelView");
+	shadow_uniforms.pos_scale = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "posScale");
+	shadow_uniforms.pos_offset = shaderInstanceGetUniformLocation(shadow_program.vertexShader, "posOffset");
 
 	stream_vertices = (CanvasVertex *)linearAlloc(sizeof(CanvasVertex) * STREAM_VERTICES);
 	stream_indices = (uint16_t *)linearAlloc(sizeof(uint16_t) * STREAM_INDICES);
@@ -202,18 +207,34 @@ void RasterizerCitro3D::finalize() {
 	C3D_Fini();
 }
 
+void RasterizerCitro3D::_set_mesh_attributes(bool p_packed) {
+	// Loaders are added in memory order, so the buffer permutation is always
+	// 0x3210; the register number is the shader input (v0 pos, v1 normal,
+	// v2 uv, v3 color). The scene and shadow shaders share both layouts.
+	C3D_AttrInfo *ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	if (p_packed) {
+		AttrInfo_AddLoader(ai, 0, GPU_SHORT, 3); // position
+		AttrInfo_AddLoader(ai, 2, GPU_SHORT, 2); // uv
+		AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4); // color
+		AttrInfo_AddLoader(ai, 1, GPU_BYTE, 3); // normal
+	} else {
+		AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3); // position
+		AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3); // normal
+		AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2); // uv
+		AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4); // color
+	}
+	bound_layout = p_packed ? 1 : 0;
+}
+
 void RasterizerCitro3D::bind_scene_program() {
 	if (bound_program == 0) {
 		return;
 	}
 	C3D_BindProgram(&scene_program);
-	C3D_AttrInfo *ai = C3D_GetAttrInfo();
-	AttrInfo_Init(ai);
-	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3); // position
-	AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3); // normal
-	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2); // uv
-	AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4); // color
+	_set_mesh_attributes(false);
 	bound_program = 0;
+	set_mesh_vertex_format(nullptr);
 }
 
 void RasterizerCitro3D::bind_shadow_program() {
@@ -221,13 +242,26 @@ void RasterizerCitro3D::bind_shadow_program() {
 		return;
 	}
 	C3D_BindProgram(&shadow_program);
-	C3D_AttrInfo *ai = C3D_GetAttrInfo();
-	AttrInfo_Init(ai);
-	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3); // Same vertex layout as the scene.
-	AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);
-	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
-	AttrInfo_AddLoader(ai, 3, GPU_UNSIGNED_BYTE, 4);
+	_set_mesh_attributes(false);
 	bound_program = 2;
+	set_mesh_vertex_format(nullptr);
+}
+
+void RasterizerCitro3D::set_mesh_vertex_format(const VertexQuant *p_quant) {
+	static const VertexQuant identity;
+	const VertexQuant &q = p_quant ? *p_quant : identity;
+	int layout = p_quant ? 1 : 0;
+	if (bound_layout != layout) {
+		_set_mesh_attributes(p_quant != nullptr);
+	}
+	if (bound_program == 0) {
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, scene_uniforms.pos_scale, q.pos_scale[0], q.pos_scale[1], q.pos_scale[2], 0);
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, scene_uniforms.pos_offset, q.pos_offset[0], q.pos_offset[1], q.pos_offset[2], 0);
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, scene_uniforms.uv_quant, q.uv_scale[0], q.uv_scale[1], q.uv_offset[0], q.uv_offset[1]);
+	} else if (bound_program == 2) {
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, shadow_uniforms.pos_scale, q.pos_scale[0], q.pos_scale[1], q.pos_scale[2], 0);
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, shadow_uniforms.pos_offset, q.pos_offset[0], q.pos_offset[1], q.pos_offset[2], 0);
+	}
 }
 
 void RasterizerCitro3D::bind_canvas_program() {
@@ -244,6 +278,7 @@ void RasterizerCitro3D::bind_canvas_program() {
 	C3D_BufInfo *bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, stream_vertices, sizeof(CanvasVertex), 4, 0x3210);
+	bound_layout = -1;
 	// The scene binds per-mesh buffers, so this has to be redone after it.
 	C3D_LightEnvBind(nullptr);
 	bound_program = 1;
