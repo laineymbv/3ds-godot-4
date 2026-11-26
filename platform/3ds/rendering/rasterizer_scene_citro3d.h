@@ -39,6 +39,10 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
 
+namespace Citro3D {
+struct Texture;
+}
+
 class RenderSceneBuffersCitro3D : public RenderSceneBuffers {
 	GDCLASS(RenderSceneBuffersCitro3D, RenderSceneBuffers);
 
@@ -81,6 +85,11 @@ private:
 		Transform3D model;
 		Citro3D::MaterialState material;
 		float depth = 0;
+		// Filled by _prepare_draw_items() after the lists are built.
+		Citro3D::Texture *texture = nullptr; // Resolved albedo texture.
+		AABB world_aabb; // For picking lights per object.
+		uint32_t state_key = 0; // Raster/TEV/lighting setup, see _state_key().
+		uint32_t material_hash = 0; // Light material and texture parameters.
 	};
 	LocalVector<DrawItem> opaque_list;
 	LocalVector<DrawItem> transparent_list;
@@ -98,6 +107,56 @@ private:
 	} light_lut_keys[MAX_LIGHTS];
 	C3D_LightLut specular_luts[SPECULAR_BUCKETS];
 	int bound_specular = -1;
+
+	// Lights bound to slots by _setup_lights(), for picking per object.
+	struct LightSlot {
+		Vector3 origin; // World space.
+		float range = 0;
+		bool directional = false;
+	} light_slots[MAX_LIGHTS];
+	int light_slot_count = 0;
+	uint8_t _light_mask_for(const DrawItem &p_item) const;
+
+	// The GPU state _apply_material() and _draw_list() last set, so unchanged
+	// state is not sent again. render_scene() resets it for each eye after the
+	// sky and _setup_lights(), the last things before the lists that touch
+	// this state; the shadow pass and the canvas run outside it.
+	struct StateCache {
+		bool valid = false;
+		uint32_t state_key = 0;
+		Citro3D::Texture *texture = nullptr;
+		int tex_filter = -1;
+		int tex_wrap = -1;
+		Vector2 uv_scale;
+		Vector2 uv_offset;
+		uint32_t tev_color = 0;
+		C3D_Material light_material = {};
+		int8_t two_sided = -1; // Two-sided diffuse on the light slots; -1 unknown.
+		uint8_t light_mask = 0; // Enabled light slots. Not reset by valid = false.
+		const Citro3D::Vertex *vertices = nullptr;
+	} state_cache;
+
+	// Per-frame counters, to measure the effect of the state cache. Reported
+	// through the viewport's render info (Performance monitors) and, when
+	// rendering/3ds/debug/print_frame_stats is on, printed once a second.
+	struct FrameStats {
+		uint32_t draw_calls = 0;
+		uint32_t shadow_draw_calls = 0;
+		uint32_t primitives = 0;
+		uint32_t objects = 0;
+		uint32_t state_changes = 0; // Groups of GPU state sent (see _apply_material).
+		uint32_t state_skips = 0; // Groups skipped because they were unchanged.
+		uint32_t texture_binds = 0;
+		uint32_t tev_updates = 0;
+		uint32_t light_material_updates = 0;
+		uint32_t light_mask_changes = 0;
+		uint32_t vertex_buffer_binds = 0;
+		uint32_t lit_draws = 0;
+		uint32_t lights_enabled_total = 0; // Sum over lit draws, for an average.
+	} frame_stats, stats_accum;
+	int stats_frames = 0;
+	uint64_t stats_last_print_ms = 0;
+	void _report_stats(RenderingServerTypes::RenderInfo *r_render_info);
 
 	double time = 0;
 
@@ -143,6 +202,8 @@ private:
 	void _setup_fog(RID p_environment, const Projection &p_proj);
 
 	void _add_mesh(GeometryInstanceCitro3D *p_gi, RID p_mesh, const Transform3D &p_model, const Color &p_color, float p_depth);
+	uint32_t _state_key(const DrawItem &p_item, bool p_transparent) const;
+	void _prepare_draw_items(LocalVector<DrawItem> &p_list, bool p_transparent);
 	void _fill_draw_lists(const CameraData *p_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances);
 	void _setup_lights(const PagedArray<RID> &p_lights, const Transform3D &p_view, const Vector3 &p_cam_pos, const Color &p_ambient);
 	void _draw_item_geometry(const DrawItem &p_item, const Transform3D &p_view);

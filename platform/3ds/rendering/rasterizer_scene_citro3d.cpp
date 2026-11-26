@@ -36,6 +36,8 @@
 #include "utilities_citro3d.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
+#include "core/templates/hashfuncs.h"
 
 using namespace Citro3D;
 
@@ -89,6 +91,7 @@ void RasterizerSceneCitro3D::initialize() {
 	GLOBAL_DEF("rendering/3ds/stereo/max_separation", 0.12);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/3ds/shadows/size", PROPERTY_HINT_ENUM, "256,512,1024"), 512);
 	GLOBAL_DEF("rendering/3ds/shadows/max_distance", 20.0);
+	GLOBAL_DEF("rendering/3ds/debug/print_frame_stats", false);
 	GLOBAL_DEF("rendering/3ds/shadows/bias", 0.012);
 	GLOBAL_DEF("rendering/3ds/stereo/convergence", 3.0);
 }
@@ -491,14 +494,122 @@ void RasterizerSceneCitro3D::_fill_draw_lists(const CameraData *p_camera_data, c
 		}
 	}
 
-	struct FrontToBack {
-		bool operator()(const DrawItem &a, const DrawItem &b) const { return a.depth < b.depth; }
+	_prepare_draw_items(opaque_list, false);
+	_prepare_draw_items(transparent_list, true);
+	frame_stats.objects = opaque_list.size() + transparent_list.size();
+
+	// Opaque items sort by GPU state so neighbours share it and
+	// _apply_material() can skip it; depth only breaks ties. The PICA200
+	// depth test runs after lighting and TEV and the port does not enable
+	// the early depth test, so front-to-back order saved no fragment work.
+	struct ByState {
+		bool operator()(const DrawItem &a, const DrawItem &b) const {
+			if (a.state_key != b.state_key) {
+				return a.state_key < b.state_key;
+			}
+			if (a.texture != b.texture) {
+				return a.texture < b.texture;
+			}
+			if (a.material_hash != b.material_hash) {
+				return a.material_hash < b.material_hash;
+			}
+			if (a.vertices != b.vertices) {
+				return a.vertices < b.vertices;
+			}
+			return a.depth < b.depth;
+		}
 	};
+	// Transparent items must stay back to front.
 	struct BackToFront {
 		bool operator()(const DrawItem &a, const DrawItem &b) const { return a.depth > b.depth; }
 	};
-	opaque_list.sort_custom<FrontToBack>();
+	opaque_list.sort_custom<ByState>();
 	transparent_list.sort_custom<BackToFront>();
+}
+
+static int _specular_bucket(float p_roughness, int p_buckets) {
+	float rough = CLAMP(p_roughness, 0.0f, 1.0f);
+	return CLAMP((int)((1.0f - rough) * p_buckets), 0, p_buckets - 1);
+}
+
+// Everything _apply_material() derives from the shader flags and the item,
+// apart from the texture, the constant color and the light material. Two
+// items with the same key need the same cull, depth, alpha test, blend, TEV
+// stage setup, vertex color uniforms, lighting on/off, two-sided lighting,
+// specular table and texture sampling mode.
+uint32_t RasterizerSceneCitro3D::_state_key(const DrawItem &p_item, bool p_transparent) const {
+	const MaterialState &m = p_item.material;
+	const Shader::Info *info = m.shader ? &m.shader->info : nullptr;
+	bool unshaded = info && info->unshaded;
+	bool use_vertex_color = (info && info->uses_vertex_color) || (!info && p_item.surface->has_color);
+	bool has_tex = p_item.texture != nullptr;
+
+	RSE::CullMode cull = info ? info->cull : RSE::CULL_MODE_BACK;
+	uint32_t cull_bits = 0;
+	if (cull != RSE::CULL_MODE_DISABLED) {
+		bool mirror = p_item.model.basis.determinant() < 0.0f;
+		bool back = (cull == RSE::CULL_MODE_BACK) != mirror;
+		cull_bits = back ? 1 : 2;
+	}
+	bool depth_test = !(info && info->depth_test_disabled);
+	bool depth_write = !(info && info->depth_draw_never) && (!p_transparent || (info && info->depth_draw_always));
+	bool alpha_scissor = info && info->uses_alpha_scissor;
+	uint32_t blend = 7; // Opaque.
+	if (p_transparent) {
+		blend = (uint32_t)(info ? info->blend : Shader::BLEND_MIX) & 0x7;
+	}
+
+	uint32_t key = 0;
+	// Lit items sort before unlit ones, so the light environment is
+	// bound once (the highest bit sorts first).
+	key |= (unshaded ? 1u : 0u) << 31;
+	key |= (use_vertex_color ? 1u : 0u) << 1;
+	key |= (has_tex ? 1u : 0u) << 2;
+	key |= cull_bits << 3;
+	key |= (depth_test ? 1u : 0u) << 5;
+	key |= (depth_write ? 1u : 0u) << 6;
+	key |= (alpha_scissor ? 1u : 0u) << 7;
+	key |= blend << 8;
+	if (has_tex) {
+		key |= ((info && info->texture_nearest) ? 1u : 0u) << 11;
+		key |= ((info && info->texture_repeat) ? 1u : 0u) << 12;
+	}
+	if (!unshaded) {
+		key |= (uint32_t)_specular_bucket(m.roughness, SPECULAR_BUCKETS) << 13;
+	}
+	if (alpha_scissor) {
+		key |= (uint32_t)CLAMP(m.alpha_scissor * 255.0f, 0.0f, 255.0f) << 16;
+	}
+	return key;
+}
+
+void RasterizerSceneCitro3D::_prepare_draw_items(LocalVector<DrawItem> &p_list, bool p_transparent) {
+	TextureStorage *ts = TextureStorage::get_singleton();
+	for (DrawItem &item : p_list) {
+		const MaterialState &m = item.material;
+		item.texture = ts->resolve_texture(m.albedo_texture);
+		if (item.instance && item.instance->data->base_type == RSE::INSTANCE_MESH) {
+			item.world_aabb = item.instance->transformed_aabb;
+		} else {
+			item.world_aabb = item.model.xform(item.surface->aabb);
+		}
+		item.state_key = _state_key(item, p_transparent);
+		uint32_t h = hash_murmur3_one_float(m.albedo.r);
+		h = hash_murmur3_one_float(m.albedo.g, h);
+		h = hash_murmur3_one_float(m.albedo.b, h);
+		h = hash_murmur3_one_float(m.albedo.a, h);
+		h = hash_murmur3_one_float(m.emission.r, h);
+		h = hash_murmur3_one_float(m.emission.g, h);
+		h = hash_murmur3_one_float(m.emission.b, h);
+		h = hash_murmur3_one_float(m.roughness, h);
+		h = hash_murmur3_one_float(m.metallic, h);
+		h = hash_murmur3_one_float(m.specular, h);
+		h = hash_murmur3_one_float(m.uv_scale.x, h);
+		h = hash_murmur3_one_float(m.uv_scale.y, h);
+		h = hash_murmur3_one_float(m.uv_offset.x, h);
+		h = hash_murmur3_one_float(m.uv_offset.y, h);
+		item.material_hash = hash_fmix32(h);
+	}
 }
 
 void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, const Transform3D &p_view, const Vector3 &p_cam_pos, const Color &p_ambient) {
@@ -539,10 +650,14 @@ void RasterizerSceneCitro3D::_setup_lights(const PagedArray<RID> &p_lights, cons
 	}
 
 	int count = MIN((int)candidates.size(), MAX_LIGHTS);
+	light_slot_count = count;
 	for (int i = 0; i < count; i++) {
 		const Candidate &c = candidates[i];
 		C3D_Light *pl = &lights[i];
 		C3D_LightInit(pl, &light_env);
+		light_slots[i].origin = c.li->transform.origin;
+		light_slots[i].range = c.light->param[RSE::LIGHT_PARAM_RANGE];
+		light_slots[i].directional = c.light->type == RSE::LIGHT_DIRECTIONAL;
 		float energy = c.light->param[RSE::LIGHT_PARAM_ENERGY] * (c.light->negative ? -1.0f : 1.0f);
 		Color col = c.light->color * MAX(energy, 0.0f);
 		C3D_LightDiffuse(pl, col.r, col.g, col.b);
@@ -643,13 +758,17 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 	const MaterialState &m = p_item.material;
 	const Shader::Info *info = m.shader ? &m.shader->info : nullptr;
 	RasterizerCitro3D *r = RasterizerCitro3D::get_singleton();
-	TextureStorage *ts = TextureStorage::get_singleton();
+	StateCache &sc = state_cache;
+	FrameStats &st = frame_stats;
 
 	bool unshaded = info && info->unshaded;
 	bool use_vertex_color = (info && info->uses_vertex_color) || (!info && p_item.surface->has_color);
+	bool first = !sc.valid;
+	bool key_changed = first || sc.state_key != p_item.state_key;
+	bool resend_material = first;
 
 	// Texture and UV transform.
-	Texture *tex = ts->resolve_texture(m.albedo_texture);
+	Texture *tex = p_item.texture;
 	Vector2 uv_scale = m.uv_scale;
 	Vector2 uv_offset = m.uv_offset + m.uv_scroll * (float)Math::fmod(time, 1000.0);
 	if (tex) {
@@ -658,57 +777,156 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 		uv_offset *= ts_scale;
 		GPU_TEXTURE_FILTER_PARAM f = (info && info->texture_nearest) ? GPU_NEAREST : GPU_LINEAR;
 		GPU_TEXTURE_WRAP_PARAM w = (info && info->texture_repeat) ? GPU_REPEAT : GPU_CLAMP_TO_EDGE;
-		C3D_TexSetFilter(&tex->tex, f, f);
-		C3D_TexSetWrap(&tex->tex, w, w);
-		C3D_TexBind(1, &tex->tex); // Unit 0 is reserved for the shadow map.
+		if (first || sc.texture != tex || sc.tex_filter != (int)f || sc.tex_wrap != (int)w) {
+			C3D_TexSetFilter(&tex->tex, f, f);
+			C3D_TexSetWrap(&tex->tex, w, w);
+			C3D_TexBind(1, &tex->tex); // Unit 0 is reserved for the shadow map.
+			sc.texture = tex;
+			sc.tex_filter = (int)f;
+			sc.tex_wrap = (int)w;
+			st.texture_binds++;
+			st.state_changes++;
+		} else {
+			st.state_skips++;
+		}
 	}
-	C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, uv_scale.x, uv_scale.y, uv_offset.x, uv_offset.y);
-	if (use_vertex_color) {
-		C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_scale, 1, 1, 1, 1);
-		C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_bias, 0, 0, 0, 0);
+	if (first || sc.uv_scale != uv_scale || sc.uv_offset != uv_offset) {
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.uv_transform, uv_scale.x, uv_scale.y, uv_offset.x, uv_offset.y);
+		sc.uv_scale = uv_scale;
+		sc.uv_offset = uv_offset;
+		st.state_changes++;
 	} else {
-		C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_scale, 0, 0, 0, 0);
-		C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_bias, 1, 1, 1, 1);
+		st.state_skips++;
 	}
 
-	// TEV: stage 0 = base color (lit or unlit) x texture, stage 1 = x vertex
-	// color, stage 2 = + specular.
-	C3D_TexEnv *e0 = C3D_GetTexEnv(0);
-	C3D_TexEnvInit(e0);
-	C3D_TexEnvColor(e0, color_to_abgr(m.albedo));
-	GPU_TEVSRC base = unshaded ? GPU_CONSTANT : GPU_FRAGMENT_PRIMARY_COLOR;
-	if (tex) {
-		C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
-		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
+	if (key_changed) {
+		// Everything that follows from the state key (see _state_key()).
+		st.state_changes++;
+		st.tev_updates++;
+		if (use_vertex_color) {
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_scale, 1, 1, 1, 1);
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_bias, 0, 0, 0, 0);
+		} else {
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_scale, 0, 0, 0, 0);
+			C3D_FVUnifSet(GPU_VERTEX_SHADER, r->scene_uniforms.color_bias, 1, 1, 1, 1);
+		}
+
+		// TEV: stage 0 = base color (lit or unlit) x texture, stage 1 = x vertex
+		// color, stage 2 = + specular.
+		C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+		C3D_TexEnvInit(e0);
+		C3D_TexEnvColor(e0, color_to_abgr(m.albedo));
+		sc.tev_color = color_to_abgr(m.albedo);
+		GPU_TEVSRC base = unshaded ? GPU_CONSTANT : GPU_FRAGMENT_PRIMARY_COLOR;
+		if (tex) {
+			C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+			C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(e0, C3D_Both, GPU_MODULATE);
+		} else {
+			C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
+		}
+		if (first) {
+			// Stage 1 never changes; stages 3-5 stay off.
+			C3D_TexEnv *e1 = C3D_GetTexEnv(1);
+			C3D_TexEnvInit(e1);
+			C3D_TexEnvSrc(e1, C3D_Both, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(e1, C3D_Both, GPU_MODULATE);
+			for (int i = 3; i < 6; i++) {
+				C3D_TexEnvInit(C3D_GetTexEnv(i));
+			}
+		}
+		bool was_unshaded = !first && (sc.state_key >> 31);
+		if (first || was_unshaded != unshaded) {
+			C3D_TexEnv *e2 = C3D_GetTexEnv(2);
+			C3D_TexEnvInit(e2);
+			if (unshaded) {
+				C3D_TexEnvSrc(e2, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+				C3D_TexEnvFunc(e2, C3D_Both, GPU_REPLACE);
+			} else {
+				C3D_TexEnvSrc(e2, C3D_RGB, GPU_PREVIOUS, GPU_FRAGMENT_SECONDARY_COLOR, GPU_PRIMARY_COLOR);
+				C3D_TexEnvFunc(e2, C3D_RGB, GPU_ADD);
+				C3D_TexEnvSrc(e2, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+				C3D_TexEnvFunc(e2, C3D_Alpha, GPU_REPLACE);
+			}
+			C3D_LightEnvBind(unshaded ? nullptr : &light_env);
+			resend_material = true;
+		}
+
+		if (!unshaded) {
+			int bucket = _specular_bucket(m.roughness, SPECULAR_BUCKETS);
+			if (bucket != bound_specular) {
+				C3D_LightEnvLut(&light_env, GPU_LUT_D0, GPU_LUTINPUT_NH, false, &specular_luts[bucket]);
+				bound_specular = bucket;
+			}
+			int8_t two_sided = (info && info->cull == RSE::CULL_MODE_DISABLED) ? 1 : 0;
+			if (sc.two_sided != two_sided) {
+				for (int i = 0; i < light_slot_count; i++) {
+					C3D_LightTwoSideDiffuse(&lights[i], two_sided);
+				}
+				sc.two_sided = two_sided;
+			}
+		}
+
+		// Raster state.
+		RSE::CullMode cull = info ? info->cull : RSE::CULL_MODE_BACK;
+		if (cull == RSE::CULL_MODE_DISABLED) {
+			C3D_CullFace(GPU_CULL_NONE);
+		} else {
+			// Godot's front faces are clockwise; through the y-flipped projection
+			// the PICA200 sees them counter-clockwise.
+			bool mirror = p_item.model.basis.determinant() < 0.0f;
+			bool back = (cull == RSE::CULL_MODE_BACK) != mirror;
+			C3D_CullFace(back ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW);
+		}
+
+		bool depth_test = !(info && info->depth_test_disabled);
+		bool depth_write = !(info && info->depth_draw_never) && (!p_transparent || (info && info->depth_draw_always));
+		C3D_DepthTest(depth_test, GPU_GREATER, depth_write ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+
+		if (info && info->uses_alpha_scissor) {
+			C3D_AlphaTest(true, GPU_GREATER, (int)CLAMP(m.alpha_scissor * 255.0f, 0.0f, 255.0f));
+		} else {
+			C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		}
+
+		if (!p_transparent) {
+			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		} else {
+			Shader::Blend blend = info ? info->blend : Shader::BLEND_MIX;
+			switch (blend) {
+				case Shader::BLEND_ADD:
+					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+					break;
+				case Shader::BLEND_SUB:
+					C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+					break;
+				case Shader::BLEND_MUL:
+					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_COLOR, GPU_ZERO, GPU_ZERO, GPU_ONE);
+					break;
+				case Shader::BLEND_PREMUL_ALPHA:
+					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+					break;
+				default:
+					C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+					break;
+			}
+		}
 	} else {
-		C3D_TexEnvSrc(e0, C3D_RGB, base, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
-	}
-	C3D_TexEnv *e1 = C3D_GetTexEnv(1);
-	C3D_TexEnvInit(e1);
-	C3D_TexEnvSrc(e1, C3D_Both, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-	C3D_TexEnvFunc(e1, C3D_Both, GPU_MODULATE);
-	C3D_TexEnv *e2 = C3D_GetTexEnv(2);
-	C3D_TexEnvInit(e2);
-	if (unshaded) {
-		C3D_TexEnvSrc(e2, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
-		C3D_TexEnvFunc(e2, C3D_Both, GPU_REPLACE);
-	} else {
-		C3D_TexEnvSrc(e2, C3D_RGB, GPU_PREVIOUS, GPU_FRAGMENT_SECONDARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(e2, C3D_RGB, GPU_ADD);
-		C3D_TexEnvSrc(e2, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
-		C3D_TexEnvFunc(e2, C3D_Alpha, GPU_REPLACE);
-	}
-	for (int i = 3; i < 6; i++) {
-		C3D_TexEnvInit(C3D_GetTexEnv(i));
+		st.state_skips++;
+		uint32_t tev_color = color_to_abgr(m.albedo);
+		if (sc.tev_color != tev_color) {
+			// Only the constant color differs; stage 0 alone is sent again.
+			C3D_TexEnvColor(C3D_GetTexEnv(0), tev_color);
+			sc.tev_color = tev_color;
+			st.state_changes++;
+		} else {
+			st.state_skips++;
+		}
 	}
 
-	if (unshaded) {
-		C3D_LightEnvBind(nullptr);
-	} else {
-		C3D_LightEnvBind(&light_env);
+	if (!unshaded) {
 		C3D_Material mtl = {};
 		Color albedo = m.albedo;
 		// Metals tint their highlight and lose diffuse.
@@ -719,61 +937,43 @@ void RasterizerSceneCitro3D::_apply_material(const DrawItem &p_item, bool p_tran
 		Color spec = Color(0.5f, 0.5f, 0.5f).lerp(albedo, m.metallic) * (m.specular * 2.0f) * (1.0f - rough);
 		_bgr(mtl.specular0, spec);
 		_bgr(mtl.emission, m.emission);
-		C3D_LightEnvMaterial(&light_env, &mtl);
-		int bucket = CLAMP((int)((1.0f - rough) * SPECULAR_BUCKETS), 0, SPECULAR_BUCKETS - 1);
-		if (bucket != bound_specular) {
-			C3D_LightEnvLut(&light_env, GPU_LUT_D0, GPU_LUTINPUT_NH, false, &specular_luts[bucket]);
-			bound_specular = bucket;
-		}
-		for (int i = 0; i < MAX_LIGHTS; i++) {
-			C3D_LightTwoSideDiffuse(&lights[i], info && info->cull == RSE::CULL_MODE_DISABLED);
-		}
-	}
-
-	// Raster state.
-	RSE::CullMode cull = info ? info->cull : RSE::CULL_MODE_BACK;
-	bool mirror = p_item.model.basis.determinant() < 0.0f;
-	if (cull == RSE::CULL_MODE_DISABLED) {
-		C3D_CullFace(GPU_CULL_NONE);
-	} else {
-		// Godot's front faces are clockwise; through the y-flipped projection
-		// the PICA200 sees them counter-clockwise.
-		bool back = (cull == RSE::CULL_MODE_BACK) != mirror;
-		C3D_CullFace(back ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW);
-	}
-
-	bool depth_test = !(info && info->depth_test_disabled);
-	bool depth_write = !(info && info->depth_draw_never) && (!p_transparent || (info && info->depth_draw_always));
-	C3D_DepthTest(depth_test, GPU_GREATER, depth_write ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
-
-	if (info && info->uses_alpha_scissor) {
-		C3D_AlphaTest(true, GPU_GREATER, (int)CLAMP(m.alpha_scissor * 255.0f, 0.0f, 255.0f));
-	} else {
-		C3D_AlphaTest(false, GPU_ALWAYS, 0);
-	}
-
-	if (!p_transparent) {
-		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-	} else {
-		Shader::Blend blend = info ? info->blend : Shader::BLEND_MIX;
-		switch (blend) {
-			case Shader::BLEND_ADD:
-				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
-				break;
-			case Shader::BLEND_SUB:
-				C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
-				break;
-			case Shader::BLEND_MUL:
-				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_COLOR, GPU_ZERO, GPU_ZERO, GPU_ONE);
-				break;
-			case Shader::BLEND_PREMUL_ALPHA:
-				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-				break;
-			default:
-				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-				break;
+		if (resend_material || memcmp(&mtl, &sc.light_material, sizeof(C3D_Material)) != 0) {
+			C3D_LightEnvMaterial(&light_env, &mtl);
+			sc.light_material = mtl;
+			st.light_material_updates++;
+			st.state_changes++;
+		} else {
+			st.state_skips++;
 		}
 	}
+
+	sc.state_key = p_item.state_key;
+	sc.valid = true;
+}
+
+uint8_t RasterizerSceneCitro3D::_light_mask_for(const DrawItem &p_item) const {
+	uint8_t mask = 0;
+	Vector3 lo = p_item.world_aabb.position;
+	Vector3 hi = lo + p_item.world_aabb.size;
+	for (int i = 0; i < light_slot_count; i++) {
+		const LightSlot &ls = light_slots[i];
+		if (ls.directional) {
+			mask |= 1 << i;
+			continue;
+		}
+		// Nearest point of the box to the light.
+		Vector3 p = ls.origin.clamp(lo, hi);
+		if (p.distance_squared_to(ls.origin) <= ls.range * ls.range) {
+			mask |= 1 << i;
+		}
+	}
+	if (mask == 0 && light_slot_count > 0) {
+		// The lighting unit always runs at least one light (citro3d sends a
+		// light count of zero as one, slot 0), so say so. The light is out of
+		// range, and its distance attenuation table gives it no effect.
+		mask = 1;
+	}
+	return mask;
 }
 
 void RasterizerSceneCitro3D::_draw_item_geometry(const DrawItem &p_item, const Transform3D &p_view) {
@@ -781,19 +981,47 @@ void RasterizerSceneCitro3D::_draw_item_geometry(const DrawItem &p_item, const T
 	C3D_Mtx mv;
 	_transform_to_mtx(p_view * p_item.model, &mv);
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->scene_uniforms.model_view, &mv);
-	C3D_BufInfo *bi = C3D_GetBufInfo();
-	BufInfo_Init(bi);
-	BufInfo_Add(bi, p_item.vertices, sizeof(Vertex), 4, 0x3210);
+	// MultiMesh instances and repeated meshes share one vertex buffer.
+	if (state_cache.vertices != p_item.vertices) {
+		C3D_BufInfo *bi = C3D_GetBufInfo();
+		BufInfo_Init(bi);
+		BufInfo_Add(bi, p_item.vertices, sizeof(Vertex), 4, 0x3210);
+		state_cache.vertices = p_item.vertices;
+		frame_stats.vertex_buffer_binds++;
+	}
 	if (p_item.surface->indices) {
 		C3D_DrawElements(GPU_TRIANGLES, p_item.surface->index_count, C3D_UNSIGNED_SHORT, p_item.surface->indices);
+		frame_stats.primitives += p_item.surface->index_count / 3;
 	} else {
 		C3D_DrawArrays(GPU_TRIANGLES, 0, p_item.surface->vertex_count);
+		frame_stats.primitives += p_item.surface->vertex_count / 3;
 	}
+	frame_stats.draw_calls++;
 }
 
 void RasterizerSceneCitro3D::_draw_list(LocalVector<DrawItem> &p_list, const Transform3D &p_view, bool p_transparent) {
 	for (const DrawItem &item : p_list) {
 		_apply_material(item, p_transparent);
+		bool unshaded = item.material.shader && item.material.shader->info.unshaded;
+		if (!unshaded) {
+			// Only the lights whose range reaches the item are enabled.
+			uint8_t mask = _light_mask_for(item);
+			uint8_t old_mask = state_cache.light_mask;
+			if (mask != old_mask) {
+				for (int i = 0; i < light_slot_count; i++) {
+					if (((mask ^ old_mask) >> i) & 1) {
+						C3D_LightEnable(&lights[i], (mask >> i) & 1);
+					}
+				}
+				state_cache.light_mask = mask;
+				frame_stats.light_mask_changes++;
+				frame_stats.state_changes++;
+			} else {
+				frame_stats.state_skips++;
+			}
+			frame_stats.lights_enabled_total += __builtin_popcount(mask);
+			frame_stats.lit_draws++;
+		}
 		_draw_item_geometry(item, p_view);
 	}
 }
@@ -902,13 +1130,19 @@ bool RasterizerSceneCitro3D::_render_shadow_map(const PagedArray<RID> &p_lights,
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 
+	const Vertex *bound_vertices = nullptr;
 	for (const DrawItem &item : opaque_list) {
 		C3D_Mtx mv;
 		_transform_to_mtx(light_view * item.model, &mv);
 		C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, r->shadow_uniforms.model_view, &mv);
-		C3D_BufInfo *bi = C3D_GetBufInfo();
-		BufInfo_Init(bi);
-		BufInfo_Add(bi, item.vertices, sizeof(Vertex), 4, 0x3210);
+		if (bound_vertices != item.vertices) {
+			C3D_BufInfo *bi = C3D_GetBufInfo();
+			BufInfo_Init(bi);
+			BufInfo_Add(bi, item.vertices, sizeof(Vertex), 4, 0x3210);
+			bound_vertices = item.vertices;
+			frame_stats.vertex_buffer_binds++;
+		}
+		frame_stats.shadow_draw_calls++;
 		if (item.surface->indices) {
 			C3D_DrawElements(GPU_TRIANGLES, item.surface->index_count, C3D_UNSIGNED_SHORT, item.surface->indices);
 		} else {
@@ -992,6 +1226,7 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 		bg.a = 0;
 	}
 
+	frame_stats = FrameStats();
 	_fill_draw_lists(p_camera_data, p_instances);
 	static int trace = 0;
 	if (trace++ < 3) {
@@ -1050,16 +1285,66 @@ void RasterizerSceneCitro3D::render_scene(const Ref<RenderSceneBuffers> &p_rende
 		}
 		_setup_lights(p_lights, eye_view, p_camera_data->main_transform.origin, ambient);
 		_set_shadow_matrix(eye_view);
+		// The sky and _setup_lights() changed state behind the cache's back;
+		// C3D_LightInit() left every bound light enabled.
+		state_cache = StateCache();
+		state_cache.light_mask = (uint8_t)((1u << light_slot_count) - 1);
 		_draw_list(opaque_list, eye_view, false);
 		_draw_list(transparent_list, eye_view, true);
 	}
 
 	// The scene cleared the target itself.
 	ts->render_target_disable_clear_request(rb->render_target);
+	_report_stats(r_render_info);
 
 	// The canvas draws next with its own buffers and state.
 	C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
 	C3D_LightEnvBind(nullptr);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	r->bind_canvas_program();
+}
+
+void RasterizerSceneCitro3D::_report_stats(RenderingServerTypes::RenderInfo *r_render_info) {
+	const FrameStats &f = frame_stats;
+	if (r_render_info) {
+		// What Performance.RENDER_TOTAL_*_IN_FRAME and the editor's frame info read.
+		r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += f.objects;
+		r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += f.primitives;
+		r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME] += f.draw_calls;
+		r_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME] += f.shadow_draw_calls;
+	}
+
+	if (!GLOBAL_GET_CACHED(bool, "rendering/3ds/debug/print_frame_stats")) {
+		return;
+	}
+	FrameStats &a = stats_accum;
+	a.draw_calls += f.draw_calls;
+	a.shadow_draw_calls += f.shadow_draw_calls;
+	a.primitives += f.primitives;
+	a.objects += f.objects;
+	a.state_changes += f.state_changes;
+	a.state_skips += f.state_skips;
+	a.texture_binds += f.texture_binds;
+	a.tev_updates += f.tev_updates;
+	a.light_material_updates += f.light_material_updates;
+	a.light_mask_changes += f.light_mask_changes;
+	a.vertex_buffer_binds += f.vertex_buffer_binds;
+	a.lights_enabled_total += f.lights_enabled_total;
+	a.lit_draws += f.lit_draws;
+	stats_frames++;
+
+	uint64_t now = OS::get_singleton()->get_ticks_msec();
+	if (now - stats_last_print_ms < 1000) {
+		return;
+	}
+	// Averages per scene render (both eyes together) over the last second.
+	float n = MAX(stats_frames, 1);
+	print_line(vformat("3DS scene: %d renders, per render: objects %.1f, draws %.1f (+%.1f shadow), tris %.0f, state sent %.1f / skipped %.1f, tex binds %.1f, TEV setups %.1f, light materials %.1f, light mask changes %.1f, vertex buffers %.1f, lights per lit draw %.2f",
+			stats_frames, a.objects / n, a.draw_calls / n, a.shadow_draw_calls / n, a.primitives / n,
+			a.state_changes / n, a.state_skips / n, a.texture_binds / n, a.tev_updates / n,
+			a.light_material_updates / n, a.light_mask_changes / n, a.vertex_buffer_binds / n,
+			a.lit_draws ? (float)a.lights_enabled_total / a.lit_draws : 0.0f));
+	stats_accum = FrameStats();
+	stats_frames = 0;
+	stats_last_print_ms = now;
 }

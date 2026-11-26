@@ -292,7 +292,11 @@ most of what a game uses works, and a few features don't exist.</p>
   cull modes, depth draw and test, alpha scissor, and texture filter and
   repeat.</li>
 <li><strong>Lights.</strong> Up to 8 per scene: directional, omni and spot, with Godot's
-  distance falloff, plus the environment's ambient light.</li>
+  distance falloff, plus the environment's ambient light. Each object turns
+  on only the omni and spot lights whose range reaches its bounds.</li>
+<li><strong>Frame stats.</strong> Draw calls, triangles and objects show in the Performance
+  monitors. With <code>rendering/3ds/debug/print_frame_stats</code> on, the scene also
+  prints, once a second, how much GPU state it sent and skipped.</li>
 <li><strong>Shadows.</strong> From the first <code>DirectionalLight3D</code> with shadows on (or else the
   first shadowed <code>SpotLight3D</code>). The shadow map is orthographic around the
   camera, out to <code>rendering/3ds/shadows/max_distance</code> (default 20), at
