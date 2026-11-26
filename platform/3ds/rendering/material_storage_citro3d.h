@@ -101,14 +101,10 @@ struct Shader {
 	String path;
 	Info info;
 	ShaderRecipe recipe; // Custom spatial shaders only.
-	Dependency dependency;
-};
-
-struct Material {
-	RID shader;
-	RID next_pass;
-	int priority = 0;
-	HashMap<StringName, Variant> params;
+	// Changes whenever code (and so info/recipe) changes. Drawn from one
+	// counter for all shaders, so a shader freed and allocated again at the
+	// same address never matches a material's cached version.
+	uint64_t version = 0;
 	Dependency dependency;
 };
 
@@ -128,12 +124,29 @@ struct MaterialState {
 	Vector2 uv_scroll;
 };
 
+struct Material {
+	RID shader;
+	RID next_pass;
+	int priority = 0;
+	HashMap<StringName, Variant> params;
+	float stereo_depth = 0.0f; // Param "stereo_depth", kept for the canvas.
+	Dependency dependency;
+
+	// get_state() result, rebuilt when a param or the shader changes.
+	mutable MaterialState state;
+	mutable bool state_dirty = true;
+	mutable const Shader *state_shader = nullptr;
+	mutable uint64_t state_shader_version = 0;
+};
+
 class MaterialStorage : public RendererDummy::MaterialStorage {
 	static inline MaterialStorage *singleton = nullptr;
 	mutable RID_Owner<Shader, true> shader_owner;
 	mutable RID_Owner<Material, true> material_owner;
 	HashSet<RID> embedded_set;
+	uint64_t shader_version_counter = 0;
 
+	void _build_state(const Material *p_material, const Shader *p_shader, MaterialState &r_state) const;
 	void _parse_shader(Shader *p_shader);
 	void _translate_custom(Shader *p_shader);
 
@@ -145,8 +158,9 @@ public:
 	bool owns_shader(RID p_rid) { return shader_owner.owns(p_rid); }
 	bool owns_material(RID p_rid) { return material_owner.owns(p_rid); }
 
-	// Fills r_state from a material (or defaults when the RID is null).
-	void get_state(RID p_material, MaterialState &r_state) const;
+	// Render state of a material (defaults when the RID is null). Cached per
+	// material; the reference stays valid until the material changes.
+	const MaterialState &get_state(RID p_material) const;
 
 	RID shader_allocate() override;
 	void shader_initialize(RID p_rid, bool p_embedded) override;
