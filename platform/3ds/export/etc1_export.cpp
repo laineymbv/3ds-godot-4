@@ -39,7 +39,7 @@
 #include "modules/modules_enabled.gen.h" // For etcpak.
 
 #ifdef MODULE_ETCPAK_ENABLED
-#include "thirdparty/etcpak/ProcessRGB.hpp"
+#include <thirdparty/etcpak/ProcessRGB.hpp>
 #endif
 
 Ref<Image> EditorExportPlugin3DSTextures::encode_etc1(const Ref<Image> &p_image) {

@@ -4,7 +4,7 @@
 		Access to 3DS hardware: the 3D slider, the stereo settings, 2D depth, and screen capture.
 	</brief_description>
 	<description>
-		[Nintendo3DS] is available as the singleton [code]Nintendo3DS[/code] on the 3DS. The stock editor doesn't know the class, so reach it through [method Engine.get_singleton] and check [method Engine.has_singleton] first:
+		[Nintendo3DS] is available as the singleton [code skip-lint]Nintendo3DS[/code] on the 3DS. The stock editor doesn't know the class, so reach it through [method Engine.get_singleton] and check [method Engine.has_singleton] first:
 		[codeblock]
 		var n3ds = Engine.get_singleton("Nintendo3DS") if Engine.has_singleton("Nintendo3DS") else null
 		[/codeblock]
@@ -69,7 +69,7 @@
 			<return type="void" />
 			<param index="0" name="dir" type="String" />
 			<description>
-				Saves what the screens show after the current frame, as [code]top_left.png[/code], [code]top_right.png[/code] (the two eyes) and [code]bottom.png[/code], into [param dir]. Use it with [code]OS.get_user_data_dir()[/code] to check the result of a change without a camera.
+				Saves what the screens show after the current frame, as [code]top_left.png[/code], [code]top_right.png[/code] (the two eyes) and [code]bottom.png[/code], into [param dir]. Use it with [method OS.get_user_data_dir] to check the result of a change without a camera.
 			</description>
 		</method>
 		<method name="set_depth">
@@ -78,7 +78,7 @@
 			<param index="1" name="depth" type="float" />
 			<param index="2" name="recursive" type="bool" default="true" />
 			<description>
-				Places [param item] in front of ([code]depth[/code] &gt; 0) or behind ([code]depth[/code] &lt; 0) the screen. The number is in pixels of disparity at full 3D slider, and the slider scales it. A depth of [code]0.0[/code] puts the item on the screen plane, where all 2D items sit by default.
+				Places [param item] in front of ([param depth] &gt; 0) or behind ([param depth] &lt; 0) the screen. The number is in pixels of disparity at full 3D slider, and the slider scales it. A depth of [code]0.0[/code] puts the item on the screen plane, where all 2D items sit by default.
 				Each eye sees the item shifted sideways by half the depth times the slider, rounded to whole pixels so text and sprites stay sharp. The clip rectangle of a clipped item moves with it. Keep depths between about [code]-6[/code] and [code]6[/code]; larger shifts are hard to look at.
 				[b]How it works:[/b] the item gets a [ShaderMaterial] with a [code]stereo_depth[/code] parameter. If [param recursive] is [code]true[/code], descendants without a material of their own use that material and share the depth. A descendant with its own material keeps it and sits at depth [code]0.0[/code], unless you call [method set_depth] on it.
 				[b]Warning:[/b] if the item already has a different material, this replaces it. The editor's Stereo Depth row won't do that: it turns read-only in that case, so put a [code]stereo_depth[/code] uniform on that material yourself.
