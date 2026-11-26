@@ -4,6 +4,7 @@
 ; it with each receiver's texcoord0w.
 
 .fvec projection[4], modelView[4]
+.fvec posScale, posOffset ; packed positions: v0 * posScale + posOffset
 
 .constf myconst(0.0, 1.0, -1.0, 0.5)
 .alias  ones myconst.yyyy
@@ -14,7 +15,8 @@
 .alias inpos v0
 
 .proc main
-	mov r0.xyz, inpos
+	mul r0.xyz, posScale, inpos
+	add r0.xyz, posOffset, r0
 	mov r0.w,   ones
 
 	dp4 r1.x, modelView[0], r0

@@ -77,7 +77,8 @@ private:
 	struct DrawItem {
 		GeometryInstanceCitro3D *instance = nullptr;
 		const Citro3D::Surface *surface = nullptr;
-		const Citro3D::Vertex *vertices = nullptr; // Skinned copy, or the surface's.
+		const void *vertices = nullptr; // Skinned copy (Vertex), or the surface's (PackedVertex).
+		const Citro3D::VertexQuant *quant = nullptr; // Null for the skinned float copy.
 		Transform3D model;
 		Citro3D::MaterialState material;
 		float depth = 0;

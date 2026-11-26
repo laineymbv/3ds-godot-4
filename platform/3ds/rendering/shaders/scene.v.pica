@@ -7,6 +7,9 @@
 .fvec colorScale     ; vertex color is color * colorScale + colorBias,
 .fvec colorBias      ; so (1,0) uses COLOR and (0,1) ignores it.
 .fvec shadowMtx[4]   ; view space -> shadow map (u, v, depth, w)
+.fvec posScale       ; packed meshes store 16-bit positions and UVs:
+.fvec posOffset      ; pos = v0 * posScale + posOffset,
+.fvec uvQuant        ; uv = v2 * uvQuant.xy + uvQuant.zw (identity for floats)
 
 ; Constants
 .constf myconst(0.0, 1.0, -1.0, 0.5)
@@ -32,7 +35,8 @@
 .alias inclr v3
 
 .proc main
-	mov r0.xyz, inpos
+	mul r0.xyz, posScale, inpos
+	add r0.xyz, posOffset, r0
 	mov r0.w,   ones
 
 	; r1 = modelView * pos
@@ -50,6 +54,8 @@
 
 	; uv * scale + offset
 	mov r2, intex
+	mul r2.xy, uvQuant.xy, r2.xy
+	add r2.xy, uvQuant.zw, r2.xy
 	mul r2.xy, uvTransform.xy, r2.xy
 	add r2.xy, uvTransform.zw, r2.xy
 	mov outtc1, r2
@@ -72,7 +78,8 @@
 	mul r3, colorScale, r3
 	add outclr, colorBias, r3
 
-	; Normal to view space (assumes uniform scale), normalized.
+	; Normal to view space (assumes uniform scale), normalized. Packed
+	; normals are signed bytes (length ~127); the normalize covers that.
 	dp3 r14.x, modelView[0], innrm
 	dp3 r14.y, modelView[1], innrm
 	dp3 r14.z, modelView[2], innrm

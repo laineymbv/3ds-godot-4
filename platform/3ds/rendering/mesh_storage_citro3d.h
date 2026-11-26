@@ -45,16 +45,58 @@ struct Vertex {
 };
 static_assert(sizeof(Vertex) == 36);
 
+// Compact vertex for mesh surfaces: 20 bytes instead of 36. Positions and
+// UVs are 16-bit integers quantized to the surface's own bounds (see
+// VertexQuant), normals are signed bytes (the shader renormalizes them).
+// Fields are ordered so each one sits on its natural alignment with no gaps;
+// the attribute loader reads them in this order.
+struct PackedVertex {
+	int16_t position[3];
+	int16_t uv[2];
+	uint8_t color[4];
+	int8_t normal[3];
+	uint8_t pad[3];
+};
+static_assert(sizeof(PackedVertex) == 20);
+
+// Turns a PackedVertex back into floats: value = q * scale + offset. The
+// vertex shader gets the same numbers as uniforms.
+struct VertexQuant {
+	float pos_scale[3] = { 1, 1, 1 };
+	float pos_offset[3] = {};
+	float uv_scale[2] = { 1, 1 };
+	float uv_offset[2] = {};
+
+	Vector3 position(const PackedVertex &p_v) const {
+		return Vector3(p_v.position[0] * pos_scale[0] + pos_offset[0], p_v.position[1] * pos_scale[1] + pos_offset[1], p_v.position[2] * pos_scale[2] + pos_offset[2]);
+	}
+	Vector2 uv(const PackedVertex &p_v) const {
+		return Vector2(p_v.uv[0] * uv_scale[0] + uv_offset[0], p_v.uv[1] * uv_scale[1] + uv_offset[1]);
+	}
+	static Vector3 normal(const PackedVertex &p_v) {
+		return Vector3(p_v.normal[0], p_v.normal[1], p_v.normal[2]) * (1.0f / 127.0f);
+	}
+	static Color color(const PackedVertex &p_v) {
+		return Color(p_v.color[0] / 255.0f, p_v.color[1] / 255.0f, p_v.color[2] / 255.0f, p_v.color[3] / 255.0f);
+	}
+};
+
 struct Surface {
 	RSE::PrimitiveType primitive = RSE::PRIMITIVE_TRIANGLES;
 	RID material;
 	AABB aabb;
-	Vertex *vertices = nullptr; // Linear memory.
+	PackedVertex *vertices = nullptr; // Linear memory.
+	VertexQuant quant;
 	uint16_t *indices = nullptr; // Linear memory, or null for arrays.
 	int vertex_count = 0;
 	int index_count = 0;
 	bool has_color = false;
-	RenderingServerTypes::SurfaceData data; // Kept for mesh_get_surface().
+	uint64_t format = 0; // Godot's format bits, to rebuild SurfaceData.
+	// Godot's own vertex streams are only kept for surfaces that get partial
+	// updates (Sprite3D, Polygon2D, SoftBody3D, scripts) or carry blend
+	// shapes; everything else rebuilds them from the packed copy on request.
+	bool has_data = false;
+	RenderingServerTypes::SurfaceData data;
 
 	// Skinning input (CPU skinning; the PICA200 lacks uniform space for bones).
 	PackedInt32Array bones;
@@ -133,6 +175,9 @@ class MeshStorage : public RendererDummy::MeshStorage {
 	LocalVector<void *> dead_buffers; // Freed once the GPU is done with them.
 
 	void _surface_release(Surface &p_surface);
+	bool _surface_create(const RenderingServerTypes::SurfaceData &p_data, bool p_keep_data, Surface &r_surface);
+	RenderingServerTypes::SurfaceData _surface_rebuild_data(const Surface &p_surface) const;
+	void _surface_update_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data, bool p_attributes);
 	void _update_aabb(Mesh *p_mesh);
 
 public:
