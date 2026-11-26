@@ -212,6 +212,7 @@
 # Platform
 
 /platform/register_platform_apis.*            @godotengine/buildsystem
+/platform/3ds/                                @laineymbv
 /platform/android/                            @godotengine/android
 /platform/android/doc_classes/                @godotengine/android @godotengine/documentation
 /platform/ios/                                @godotengine/ios
