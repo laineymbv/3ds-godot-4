@@ -339,8 +339,19 @@ still visible.
 ## Textures
 
 - **Formats.** Lossless imports (WebP), Lossy, and VRAM Compressed all load.
-  VRAM Compressed textures are exported as S3TC and decompressed on the 3DS
-  when they load (with `bcdec`). Lossless and Lossy load faster.
+  VRAM Compressed textures are exported as ETC1, which the PICA200 samples as
+  it is: 4 bits per texel, or 8 with alpha (ETC1A4, 4-bit alpha). Lossless and
+  Lossy textures are decompressed to 16 or 32 bits when they load.
+- **ETC1 export.** The preset option `textures/etc1` picks what is
+  re-encoded: `VRAM Compressed Only` (the default), `All`, or `Disabled`.
+  `All` also takes 2D textures, which costs some sharpness on pixel art.
+  `Disabled` exports S3TC, which the 3DS decompresses on load (with `bcdec`).
+  ETC1 textures can't be read back with `Texture2D.get_image()` on the 3DS.
+- **VRAM.** Textures start in linear memory. Between frames, the ones drawn
+  most move to VRAM, a few hundred KiB per frame, while
+  `rendering/3ds/textures/vram_reserve_kb` (1024 by default) stays free for
+  render targets. Textures updated after they load stay in linear memory.
+  `rendering/3ds/textures/vram_textures` turns this off.
 - **Size.** Textures larger than 1024 x 1024 are downscaled on load. Keep
   them at 512 or below where you can; the 3DS has little VRAM.
 - **Mipmaps.** Textures imported with mipmaps (the 3D default) get a full

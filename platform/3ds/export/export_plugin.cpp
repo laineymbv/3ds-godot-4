@@ -200,8 +200,9 @@ Vector<uint8_t> EditorExportPlatform3DS::make_romfs_header(const String &p_file_
 }
 
 void EditorExportPlatform3DS::get_preset_features(const Ref<EditorExportPreset> &p_preset, List<String> *r_features) const {
-	// VRAM-compressed textures export as BCn; the template decompresses them
-	// at load (bcdec), since the PICA200 can't sample S3TC/ETC2/ASTC.
+	// VRAM-compressed textures import as BCn. With textures/etc1 on, the
+	// exporter re-encodes them as ETC1; otherwise the template decompresses
+	// them at load (bcdec), since the PICA200 can't sample S3TC/ETC2/ASTC.
 	r_features->push_back("s3tc");
 	r_features->push_back("arm32");
 }
@@ -219,6 +220,9 @@ void EditorExportPlatform3DS::get_export_options(List<ExportOption> *r_options) 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "application/description"), "Made with Godot Engine"));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "application/author"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "application/icon", PROPERTY_HINT_FILE, "*.png,*.svg,*.webp,*.jpg"), ""));
+	// Re-encode textures as ETC1/ETC1A4, which the PICA200 samples directly
+	// (see etc1_export.h). Default: textures imported as VRAM Compressed.
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "textures/etc1", PROPERTY_HINT_ENUM, "Disabled,VRAM Compressed Only,All"), 1));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "cia/unique_id", PROPERTY_HINT_RANGE, "0,1015807,1"), 0)); // 0 = derived from the title.
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "cia/product_code", PROPERTY_HINT_PLACEHOLDER_TEXT, "CTR-P-XXXX"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "cia/banner", PROPERTY_HINT_FILE, "*.png"), ""));

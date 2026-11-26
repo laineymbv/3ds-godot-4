@@ -30,6 +30,8 @@
 
 #include "texture_storage_citro3d.h"
 
+#include "etc1_pica.h"
+
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
 
@@ -43,6 +45,10 @@ TextureStorage::TextureStorage() {
 	APT_CheckNew3DS(&is_new);
 	int mode = GLOBAL_GET("rendering/3ds/textures/format");
 	compact_textures = mode == 1 || (mode == 0 && !is_new);
+	vram_textures = GLOBAL_DEF("rendering/3ds/textures/vram_textures", true);
+	// Left free for render targets, which must live in VRAM.
+	// GUESS: 1 MiB covers a resize of the 512x256 stereo target plus depth.
+	vram_reserve = (uint32_t)(int)GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/3ds/textures/vram_reserve_kb", PROPERTY_HINT_RANGE, "0,6144,64"), 1024) * 1024;
 }
 
 TextureStorage::~TextureStorage() {
@@ -128,6 +134,70 @@ void TextureStorage::_texture_release(Texture *p_tex) {
 		dead_textures.push_back(p_tex->tex); // Freed once the GPU is done.
 	}
 	p_tex->allocated = false;
+	p_tex->in_vram = false;
+}
+
+bool TextureStorage::_texture_move_to_vram(Texture *p_tex) {
+	C3D_TexInitParams params;
+	params.width = p_tex->tex.width;
+	params.height = p_tex->tex.height;
+	params.maxLevel = p_tex->mipmaps ? p_tex->tex.maxLevel : 0;
+	params.format = p_tex->tex.fmt;
+	params.type = GPU_TEX_2D;
+	params.onVram = true;
+	C3D_Tex vram;
+	if (!C3D_TexInitWithParams(&vram, nullptr, params)) {
+		return false;
+	}
+	// The CPU can't fill VRAM with the data cache in the way; the GPU copies it.
+	// GUESS: C3D_SyncTextureCopy is fine outside C3D_FrameBegin/End.
+	GSPGPU_FlushDataCache(p_tex->tex.data, p_tex->tex.size);
+	C3D_SyncTextureCopy((u32 *)p_tex->tex.data, 0, (u32 *)vram.data, 0, MIN(vram.size, p_tex->tex.size), 8);
+	vram.param = p_tex->tex.param;
+	vram.border = p_tex->tex.border;
+	vram.lodBias = p_tex->tex.lodBias;
+	vram.minLevel = p_tex->tex.minLevel;
+	dead_textures.push_back(p_tex->tex); // The last frame may still sample it.
+	p_tex->tex = vram;
+	p_tex->in_vram = true;
+	return true;
+}
+
+void TextureStorage::_promote_hot_textures() {
+	if (hot_textures.is_empty()) {
+		return;
+	}
+	struct Hot {
+		Texture *tex;
+		uint32_t uses;
+		bool operator<(const Hot &p_other) const { return uses > p_other.uses; } // Most bound first.
+	};
+	LocalVector<Hot> hot;
+	for (const RID &rid : hot_textures) {
+		Texture *t = texture_owner.get_or_null(rid);
+		// Textures uploaded more than once (video, dynamic images) stay put:
+		// an update would have to go back through linear memory anyway.
+		if (t && t->allocated && !t->in_vram && t->render_target.is_null() && t->used_frame == frame_index && t->updates <= 1) {
+			hot.push_back({ t, t->frame_uses });
+		}
+	}
+	hot_textures.clear();
+	hot.sort();
+	// GUESS: 256 KiB of copies per frame keeps the stall well under a millisecond.
+	const uint32_t frame_budget = 256 * 1024;
+	uint32_t moved = 0;
+	for (const Hot &h : hot) {
+		uint32_t size = h.tex->tex.size;
+		if (moved + size > frame_budget) {
+			continue;
+		}
+		if (vramSpaceFree() < size + vram_reserve) {
+			continue;
+		}
+		if (_texture_move_to_vram(h.tex)) {
+			moved += size;
+		}
+	}
 }
 
 void TextureStorage::frame_prepare() {
@@ -142,6 +212,8 @@ void TextureStorage::frame_prepare() {
 		}
 	}
 	dead_targets.clear();
+	_promote_hot_textures();
+	frame_index++;
 	LocalVector<RID> pending;
 	for (const RID &rid : pending_realloc) {
 		pending.push_back(rid);
@@ -182,8 +254,124 @@ void TextureStorage::texture_free(RID p_rid) {
 	texture_owner.free(p_rid);
 }
 
+bool TextureStorage::_texture_alloc(Texture *p_tex, int p_width, int p_height, GPU_TEXCOLOR p_format, bool p_mipmaps) {
+	// A texture in VRAM goes back to linear memory: the CPU fills it below.
+	if (p_tex->allocated && (p_tex->in_vram || p_tex->tex_width != p_width || p_tex->tex_height != p_height || p_tex->gpu_format != p_format || p_tex->mipmaps != p_mipmaps)) {
+		_texture_release(p_tex);
+	}
+	if (!p_tex->allocated) {
+		bool ok = p_mipmaps ? C3D_TexInitMipmap(&p_tex->tex, p_width, p_height, p_format) : C3D_TexInit(&p_tex->tex, p_width, p_height, p_format);
+		if (!ok) {
+			ERR_PRINT(vformat("3DS: out of linear memory for a %dx%d texture.", p_width, p_height));
+			return false;
+		}
+		p_tex->allocated = true;
+		p_tex->in_vram = false;
+	}
+	p_tex->tex_width = p_width;
+	p_tex->tex_height = p_height;
+	p_tex->gpu_format = p_format;
+	p_tex->mipmaps = p_mipmaps;
+	return true;
+}
+
+void TextureStorage::_texture_finish(Texture *p_tex) {
+	C3D_TexFlush(&p_tex->tex);
+	C3D_TexSetFilter(&p_tex->tex, GPU_LINEAR, GPU_LINEAR);
+	if (p_tex->mipmaps) {
+		C3D_TexSetFilterMipmap(&p_tex->tex, GPU_LINEAR);
+	}
+	C3D_TexSetWrap(&p_tex->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+}
+
+// ETC1 (FORMAT_ETC), and ETC2 data that only uses ETC1 blocks (what the 3DS
+// exporter writes: FORMAT_ETC2_RGB8, or FORMAT_ETC2_RGBA8 for ETC1A4), go to
+// the GPU as they are: no decompression, 4 or 8 bits per texel. Returns false
+// to fall back to decompressing.
+bool TextureStorage::_texture_upload_etc(Texture *p_tex, const Ref<Image> &p_image) {
+	const Image::Format src_format = p_image->get_format();
+	const bool alpha = src_format == Image::FORMAT_ETC2_RGBA8;
+	if (src_format != Image::FORMAT_ETC && src_format != Image::FORMAT_ETC2_RGB8 && !alpha) {
+		return false;
+	}
+	const int src_block = alpha ? 16 : 8;
+	const int color_ofs = alpha ? 8 : 0; // ETC2 RGBA8: EAC alpha, then color.
+	const uint8_t *data = p_image->ptr();
+	if (src_format != Image::FORMAT_ETC) {
+		// T, H and planar blocks are ETC2 only; the PICA200 can't read them.
+		for (int64_t ofs = color_ofs, n = p_image->get_data_size(); ofs + 8 <= n; ofs += src_block) {
+			if (!ETC::color_block_is_etc1(data + ofs)) {
+				return false;
+			}
+		}
+	}
+
+	// The PICA200 tops out at 1024x1024: start at a smaller mip if there is one.
+	const int mip_count = p_image->get_mipmap_count();
+	int base = 0;
+	while ((p_image->get_width() >> base) > 1024 || (p_image->get_height() >> base) > 1024) {
+		base++;
+	}
+	if (base > mip_count) {
+		return false;
+	}
+	int64_t ofs0, size0;
+	int iw, ih;
+	p_image->get_mipmap_offset_size_and_dimensions(base, ofs0, size0, iw, ih);
+	const int tw = pot(iw);
+	const int th = pot(ih);
+	// Mips only line up with the GPU's chain when the image is a power of two.
+	const bool want_mips = mip_count > base && iw == tw && ih == th && tw >= 16 && th >= 16;
+	const GPU_TEXCOLOR fmt = alpha ? GPU_ETC1A4 : GPU_ETC1;
+	if (!_texture_alloc(p_tex, tw, th, fmt, want_mips)) {
+		return true; // Already reported; decompressing would need even more memory.
+	}
+	p_tex->width = iw;
+	p_tex->height = ih;
+	p_tex->format = src_format;
+
+	int levels = want_mips ? MIN((int)p_tex->tex.maxLevel, mip_count - base) + 1 : 1;
+	if (want_mips) {
+		p_tex->tex.maxLevel = levels - 1;
+	}
+	const uint32_t dst_block = alpha ? 16 : 8;
+	for (int level = 0; level < levels; level++) {
+		const int lw = tw >> level;
+		const int lh = th >> level;
+		u32 level_size = 0;
+		uint8_t *dst = (uint8_t *)C3D_TexGetImagePtr(&p_tex->tex, p_tex->tex.data, level, &level_size);
+		memset(dst, 0, level_size);
+		int64_t ofs, size;
+		int mw, mh;
+		p_image->get_mipmap_offset_size_and_dimensions(base + level, ofs, size, mw, mh);
+		const int src_bw = (mw + 3) / 4;
+		const int bw = MIN(src_bw, lw / 4);
+		const int bh = MIN((mh + 3) / 4, lh / 4);
+		const uint8_t *src = data + ofs;
+		for (int by = 0; by < bh; by++) {
+			for (int bx = 0; bx < bw; bx++) {
+				const uint8_t *block = src + (by * src_bw + bx) * src_block;
+				uint8_t *d = dst + ETC::block_offset(bx, by, lw, lh, dst_block);
+				uint64_t color = ETC::color_block_to_pica(block + color_ofs);
+				if (alpha) {
+					uint64_t a = ETC::eac_alpha_to_pica(block);
+					memcpy(d, &a, 8);
+					d += 8;
+				}
+				memcpy(d, &color, 8);
+			}
+		}
+	}
+	_texture_finish(p_tex);
+	return true;
+}
+
 void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) {
 	ERR_FAIL_COND(p_image.is_null() || p_image->is_empty());
+	p_tex->updates++;
+	if (_texture_upload_etc(p_tex, p_image)) {
+		return;
+	}
 	Ref<Image> img = p_image->duplicate();
 	if (img->is_compressed()) {
 		if (img->decompress() != OK) {
@@ -249,21 +437,9 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 	// mip chain down to 8x8, built on the CPU from the padded image.
 	bool want_mips = p_image->has_mipmaps() && tw >= 16 && th >= 16;
 
-	if (p_tex->allocated && (p_tex->tex_width != tw || p_tex->tex_height != th || p_tex->gpu_format != fmt || p_tex->mipmaps != want_mips)) {
-		_texture_release(p_tex);
+	if (!_texture_alloc(p_tex, tw, th, fmt, want_mips)) {
+		return;
 	}
-	if (!p_tex->allocated) {
-		bool ok = want_mips ? C3D_TexInitMipmap(&p_tex->tex, tw, th, fmt) : C3D_TexInit(&p_tex->tex, tw, th, fmt);
-		if (!ok) {
-			ERR_PRINT(vformat("3DS: out of linear memory for a %dx%d texture.", tw, th));
-			return;
-		}
-		p_tex->allocated = true;
-	}
-	p_tex->tex_width = tw;
-	p_tex->tex_height = th;
-	p_tex->gpu_format = fmt;
-	p_tex->mipmaps = want_mips;
 
 	// The logical size stays what Godot uploaded; when the image had to be
 	// shrunk, UVs still span it because uv_scale uses the stored ratio.
@@ -335,18 +511,14 @@ void TextureStorage::_texture_upload(Texture *p_tex, const Ref<Image> &p_image) 
 			}
 		}
 	}
-	C3D_TexFlush(&p_tex->tex);
-	C3D_TexSetFilter(&p_tex->tex, GPU_LINEAR, GPU_LINEAR);
-	if (want_mips) {
-		C3D_TexSetFilterMipmap(&p_tex->tex, GPU_LINEAR);
-	}
-	C3D_TexSetWrap(&p_tex->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	_texture_finish(p_tex);
 }
 
 void TextureStorage::texture_2d_initialize(RID p_texture, const Ref<Image> &p_image) {
 	Texture tex;
 	texture_owner.initialize_rid(p_texture, tex);
 	Texture *t = texture_owner.get_or_null(p_texture);
+	t->self = p_texture;
 	_texture_upload(t, p_image);
 }
 
@@ -355,7 +527,9 @@ void TextureStorage::texture_2d_layered_initialize(RID p_texture, const Vector<R
 	Texture tex;
 	texture_owner.initialize_rid(p_texture, tex);
 	if (p_layers.size()) {
-		_texture_upload(texture_owner.get_or_null(p_texture), p_layers[0]);
+		Texture *t = texture_owner.get_or_null(p_texture);
+		t->self = p_texture;
+		_texture_upload(t, p_layers[0]);
 	}
 }
 
@@ -413,7 +587,7 @@ Ref<Image> TextureStorage::_read_back(const C3D_Tex &p_tex, GPU_TEXCOLOR p_forma
 	int th = p_tex.height;
 	bool packed16 = p_format == GPU_RGB565 || p_format == GPU_RGBA5551 || p_format == GPU_RGBA4;
 	int bpp = p_format == GPU_RGBA8 ? 4 : (p_format == GPU_LA8 || packed16 ? 2 : (p_format == GPU_L8 ? 1 : 0));
-	ERR_FAIL_COND_V(bpp == 0, Ref<Image>());
+	ERR_FAIL_COND_V_MSG(bpp == 0, Ref<Image>(), "3DS: can't read back an ETC1 texture.");
 	if (packed16) {
 		// Expand to RGBA8 for scripts.
 		Vector<uint8_t> px;
@@ -501,6 +675,9 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	t->gpu_format = by->gpu_format;
 	t->tex = by->tex;
 	t->allocated = by->allocated;
+	t->in_vram = by->in_vram;
+	t->mipmaps = by->mipmaps;
+	t->updates = by->updates;
 	t->filter = by->filter;
 	t->render_target = by->render_target;
 	t->proxy_to = by->proxy_to;
