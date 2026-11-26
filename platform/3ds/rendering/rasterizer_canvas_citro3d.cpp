@@ -152,11 +152,11 @@ void RasterizerCanvasCitro3D::_emit_pending() {
 void RasterizerCanvasCitro3D::_add_quad(const Vector2 p_pos[4], const Vector2 p_uv[4], const Color &p_col) {
 	Color c[3] = { p_col, p_col, p_col };
 	Vector2 a[3] = { p_pos[0], p_pos[1], p_pos[2] };
-	Vector2 au[3] = { p_uv[0], p_uv[1], p_uv[2] };
-	_add_triangle(a, au, c);
+	Vector2 uv_a[3] = { p_uv[0], p_uv[1], p_uv[2] };
+	_add_triangle(a, uv_a, c);
 	Vector2 b[3] = { p_pos[0], p_pos[2], p_pos[3] };
-	Vector2 bu[3] = { p_uv[0], p_uv[2], p_uv[3] };
-	_add_triangle(b, bu, c);
+	Vector2 uv_b[3] = { p_uv[0], p_uv[2], p_uv[3] };
+	_add_triangle(b, uv_b, c);
 }
 
 void RasterizerCanvasCitro3D::_draw_batches(RenderTarget *p_rt, int p_eye, int p_eye_count) {
@@ -380,10 +380,7 @@ void RasterizerCanvasCitro3D::canvas_render_items(RID p_to_render_target, Item *
 		if (material.is_valid()) {
 			Material *m = ms->get_material(material);
 			if (m) {
-				const Variant *depth = m->params.getptr(StringName("stereo_depth"));
-				if (depth) {
-					item_depth = *depth;
-				}
+				item_depth = m->stereo_depth;
 			}
 			Shader *s = m ? ms->get_shader(m->shader) : nullptr;
 			if (s) {

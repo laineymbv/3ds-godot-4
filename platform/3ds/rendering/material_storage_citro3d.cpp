@@ -151,6 +151,7 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 	ERR_FAIL_NULL(s);
 	s->code = p_code;
 	_parse_shader(s);
+	s->version = ++shader_version_counter;
 	s->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 }
 
@@ -439,6 +440,7 @@ void MaterialStorage::material_set_shader(RID p_shader_material, RID p_shader) {
 	Material *m = material_owner.get_or_null(p_shader_material);
 	ERR_FAIL_NULL(m);
 	m->shader = p_shader;
+	m->state_dirty = true;
 	m->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 }
 
@@ -449,6 +451,10 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 		m->params.erase(p_param);
 	} else {
 		m->params[p_param] = p_value;
+	}
+	m->state_dirty = true;
+	if (p_param == SNAME("stereo_depth")) {
+		m->stereo_depth = p_value.get_type() == Variant::NIL ? 0.0f : float(p_value);
 	}
 }
 
@@ -489,8 +495,8 @@ void MaterialStorage::material_update_dependency(RID p_material, DependencyTrack
 }
 
 template <typename T>
-static bool _param(const HashMap<StringName, Variant> &p_params, const char *p_name, T &r_value) {
-	const Variant *v = p_params.getptr(StringName(p_name));
+static bool _param(const HashMap<StringName, Variant> &p_params, const StringName &p_name, T &r_value) {
+	const Variant *v = p_params.getptr(p_name);
 	if (!v) {
 		return false;
 	}
@@ -498,44 +504,58 @@ static bool _param(const HashMap<StringName, Variant> &p_params, const char *p_n
 	return true;
 }
 
-void MaterialStorage::get_state(RID p_material, MaterialState &r_state) const {
-	r_state = MaterialState();
-	Material *m = material_owner.get_or_null(p_material);
+const MaterialState &MaterialStorage::get_state(RID p_material) const {
+	static const MaterialState default_state;
+	const Material *m = material_owner.get_or_null(p_material);
 	if (!m) {
-		return;
+		return default_state;
 	}
-	Shader *s = shader_owner.get_or_null(m->shader);
+	// The shader is looked up every call: it can be freed, or have new code,
+	// without the material hearing about it.
+	const Shader *s = shader_owner.get_or_null(m->shader);
+	uint64_t version = s ? s->version : 0;
+	if (m->state_dirty || m->state_shader != s || m->state_shader_version != version) {
+		_build_state(m, s, m->state);
+		m->state_dirty = false;
+		m->state_shader = s;
+		m->state_shader_version = version;
+	}
+	return m->state;
+}
+
+void MaterialStorage::_build_state(const Material *m, const Shader *s, MaterialState &r_state) const {
+	r_state = MaterialState();
 	r_state.shader = s;
 	const HashMap<StringName, Variant> &p = m->params;
 
-	if (!_param(p, "albedo", r_state.albedo) && !_param(p, "color", r_state.albedo) && s) {
+	if (!_param(p, SNAME("albedo"), r_state.albedo) && !_param(p, SNAME("color"), r_state.albedo) && s) {
 		// Unset: the default written in the shader code.
-		if (!_param(s->recipe.defaults, "albedo", r_state.albedo)) {
-			_param(s->recipe.defaults, "color", r_state.albedo);
+		if (!_param(s->recipe.defaults, SNAME("albedo"), r_state.albedo)) {
+			_param(s->recipe.defaults, SNAME("color"), r_state.albedo);
 		}
 	}
-	if (!_param(p, "texture_albedo", r_state.albedo_texture)) {
-		_param(p, "texture", r_state.albedo_texture);
+	if (!_param(p, SNAME("texture_albedo"), r_state.albedo_texture)) {
+		_param(p, SNAME("texture"), r_state.albedo_texture);
 	}
 	Vector3 v3;
-	if (_param(p, "uv1_scale", v3)) {
+	if (_param(p, SNAME("uv1_scale"), v3)) {
 		r_state.uv_scale = Vector2(v3.x, v3.y);
 	}
-	if (_param(p, "uv1_offset", v3)) {
+	if (_param(p, SNAME("uv1_offset"), v3)) {
 		r_state.uv_offset = Vector2(v3.x, v3.y);
 	}
 	if (s && s->info.uses_emission) {
 		Color e;
 		float energy = 1.0;
-		if (_param(p, "emission", e)) {
-			_param(p, "emission_energy", energy);
+		if (_param(p, SNAME("emission"), e)) {
+			_param(p, SNAME("emission_energy"), energy);
 			r_state.emission = Color(e.r * energy, e.g * energy, e.b * energy);
 		}
 	}
-	_param(p, "roughness", r_state.roughness);
-	_param(p, "metallic", r_state.metallic);
-	_param(p, "specular", r_state.specular);
-	_param(p, "alpha_scissor_threshold", r_state.alpha_scissor);
+	_param(p, SNAME("roughness"), r_state.roughness);
+	_param(p, SNAME("metallic"), r_state.metallic);
+	_param(p, SNAME("specular"), r_state.specular);
+	_param(p, SNAME("alpha_scissor_threshold"), r_state.alpha_scissor);
 	r_state.transparent = s && (s->info.uses_alpha || s->info.blend != Shader::BLEND_MIX);
 
 	if (s && s->recipe.ok) {
